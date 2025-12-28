@@ -1,0 +1,7 @@
+numpy
+networkx
+scipy
+scikit-optimize
+matplotlib
+seaborn
+Pillow
