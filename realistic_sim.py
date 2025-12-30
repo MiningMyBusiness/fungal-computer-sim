@@ -342,7 +342,7 @@ def create_xor_objective(env: RealisticFungalComputer) -> Callable:
         Real(0.0, env.area_size, name='y_out'),
         Real(1.0, 5.0, name='voltage'),
         Real(50.0, 300.0, name='duration'),
-        Real(-200.0, 200.0, name='delay')
+        Real(-300.0, 300.0, name='delay')
     ])
     def objective_function(x_A: float, y_A: float, x_B: float, y_B: float, 
                           x_out: float, y_out: float, voltage: float, duration: float, delay: float) -> float:
@@ -415,9 +415,229 @@ def create_xor_objective(env: RealisticFungalComputer) -> Callable:
     return objective_function
 
 
+def optimize_fungal_constants(best_stimulus_params: dict, 
+                              env: RealisticFungalComputer,
+                              n_calls: int = 50) -> dict:
+    """Optimize fungal computer constants for a given stimulus protocol.
+    
+    This function takes the best stimulus parameters from optimize_xor_gate and
+    searches for better fungal computer constants (tau_v, tau_w, a, b, v_scale, 
+    R_off, R_on, alpha) that would improve XOR gate performance.
+    
+    The passed environment's network geometry (node positions and connections) is
+    preserved, ensuring the constants are optimized for the same topology that the
+    stimulus protocol was optimized on.
+    
+    Args:
+        best_stimulus_params: Dictionary containing the best stimulus parameters
+                             (electrode positions, voltage, duration, delay)
+        env: RealisticFungalComputer instance with the network geometry to use
+        n_calls: Number of optimization iterations (default: 50)
+        
+    Returns:
+        Dictionary containing optimized constants and results with the same environment
+    """
+    logger.info("="*60)
+    logger.info("Starting Fungal Computer Constants Optimization")
+    logger.info(f"Parameters: num_nodes={env.num_nodes}, n_calls={n_calls}")
+    logger.info(f"Using existing environment with {len(env.edge_list)} edges")
+    logger.info("="*60)
+    
+    print("Optimizing fungal computer constants with fixed stimulus protocol...")
+    opt_start_time = time.time()
+    
+    # Extract stimulus parameters
+    loc_A = (best_stimulus_params['x_A'], best_stimulus_params['y_A'])
+    loc_B = (best_stimulus_params['x_B'], best_stimulus_params['y_B'])
+    loc_out = (best_stimulus_params['x_out'], best_stimulus_params['y_out'])
+    voltage = best_stimulus_params['voltage']
+    duration = best_stimulus_params['duration']
+    delay = best_stimulus_params['delay']
+    
+    logger.info(f"Fixed stimulus: A={loc_A}, B={loc_B}, Out={loc_out}")
+    logger.info(f"Fixed protocol: V={voltage:.2f}V, duration={duration:.2f}ms, delay={delay:.2f}ms")
+    
+    # Define search space for fungal computer constants
+    space = [
+        Real(30.0, 150.0, name='tau_v'),      # Voltage time constant (ms)
+        Real(300.0, 1600.0, name='tau_w'),    # Recovery variable time constant (ms)
+        Real(0.5, 0.8, name='a'),             # FHN parameter a
+        Real(0.7, 1.2, name='b'),             # FHN parameter b
+        Real(0.5, 5.0, name='v_scale'),      # Voltage scaling factor
+        Real(50.0, 300.0, name='R_off'),      # High resistance state (Ohms)
+        Real(20.0, 50.0, name='R_on'),         # Low resistance state (Ohms)
+        Real(0.0001, 0.02, name='alpha')       # Memristor adaptation rate
+    ]
+    
+    @use_named_args(space)
+    def objective_function(tau_v: float, tau_w: float, a: float, b: float,
+                          v_scale: float, R_off: float, R_on: float, alpha: float) -> float:
+        """Evaluate XOR gate performance for given fungal computer constants.
+        
+        Args:
+            tau_v: Voltage time constant (ms)
+            tau_w: Recovery variable time constant (ms)
+            a: FHN parameter a
+            b: FHN parameter b
+            v_scale: Voltage scaling factor
+            R_off: High resistance state (Ohms)
+            R_on: Low resistance state (Ohms)
+            alpha: Memristor adaptation rate
+            
+        Returns:
+            Negative score (for minimization)
+        """
+        logger.debug(f"Evaluating constants: tau_v={tau_v:.1f}, tau_w={tau_w:.1f}, a={a:.2f}, b={b:.2f}")
+        logger.debug(f"  v_scale={v_scale:.2f}, R_off={R_off:.1f}, R_on={R_on:.1f}, alpha={alpha:.4f}")
+        eval_start = time.time()
+        
+        # Update the constants
+        env.tau_v = tau_v
+        env.tau_w = tau_w
+        env.a = a
+        env.b = b
+        env.v_scale = v_scale
+        env.R_off = R_off
+        env.R_on = R_on
+        env.alpha = alpha
+
+        # --- SAFETY CONSTRAINT 1: Physics ---
+        # Resistance Logic: Off must be significantly higher than On
+        if R_off < (1.5 * R_on):
+            return 100.0  # Penalty for low contrast
+
+        # --- SAFETY CONSTRAINT 2: Stability ---
+        # FHN stability heuristic: b must be large enough relative to a
+        if b < a:
+            return 100.0  # Penalty for oscillatory regime
+            
+        # Simulate all 4 XOR input cases with fixed stimulus protocol
+        logger.debug("Running XOR case (1,0)...")
+        _, sol_10 = env.run_experiment([loc_A], voltage, duration)
+        v_10 = np.max([env.read_output_voltage(loc_out, sol_10[i, :]) for i in range(len(sol_10))])
+        logger.debug(f"Case (1,0): max_V={v_10:.4f}")
+        
+        logger.debug("Running XOR case (0,1)...")
+        _, sol_01 = env.run_experiment([loc_B], voltage, duration)
+        v_01 = np.max([env.read_output_voltage(loc_out, sol_01[i, :]) for i in range(len(sol_01))])
+        logger.debug(f"Case (0,1): max_V={v_01:.4f}")
+        
+        logger.debug(f"Running XOR case (1,1) with delay={delay:.2f}ms...")
+        _, sol_11 = env.run_experiment([loc_A, loc_B], voltage, duration, electrode_delays=[0.0, delay])
+        v_11 = np.max([env.read_output_voltage(loc_out, sol_11[i, :]) for i in range(len(sol_11))])
+        logger.debug(f"Case (1,1): max_V={v_11:.4f}")
+        
+        logger.debug("Running XOR case (0,0)...")
+        _, sol_00 = env.run_experiment([], voltage, duration)
+        v_00 = np.max([env.read_output_voltage(loc_out, sol_00[i, :]) for i in range(len(sol_00))])
+        logger.debug(f"Case (0,0): max_V={v_00:.4f}")
+
+        # --- SAFETY CONSTRAINT 3: Numerical Explosion ---
+        # Check for NaNs or Infinity
+        if not np.all(np.isfinite([v_10, v_01, v_11, v_00])):
+            return 1000.0  # Penalty for numerical explosion
+
+        # Check for Voltage Blowup (FHN shouldn't exceed +/- 10.0 internal units)
+        # Note: We check the RAW solver output, not the scaled output
+        if (np.max(np.abs(sol_10[:, :env.num_nodes])) > 10.0 
+            or np.max(np.abs(sol_01[:, :env.num_nodes])) > 10.0 
+            or np.max(np.abs(sol_11[:, :env.num_nodes])) > 10.0 
+            or np.max(np.abs(sol_00[:, :env.num_nodes])) > 10.0):
+            return 1000.0 # Penalty for non-physical explosion
+        
+        # XOR Score: maximize separation between high (10, 01) and low (00, 11) outputs
+        min_high = min(v_10, v_01)
+        max_low = max(v_00, v_11)
+        score = min_high - max_low
+        score = min(score, 2.0) # cap at 2V to prevent extreme values that are physically unrealistic
+        
+        # Add penalty for extreme parameter values to encourage realistic physics
+        penalty = 0.0
+        if R_off < R_on:
+            penalty += 10.0  # R_off should be greater than R_on
+            logger.debug(f"Penalty applied: R_off < R_on")
+        
+        score -= penalty
+        
+        eval_time = time.time() - eval_start
+        objective_value = -score  # Negative because gp_minimize minimizes
+        logger.info(f"Eval complete in {eval_time:.2f}s: High={min_high:.2f}, Low={max_low:.2f}, Score={score:.4f}, Objective={objective_value:.4f}")
+        print(f"Constants: tau_v={tau_v:.1f}, tau_w={tau_w:.1f}, a={a:.2f}, b={b:.2f} | High={min_high:.2f}, Low={max_low:.2f} | Score: {score:.4f}")
+        return objective_value
+    
+    # Run optimization
+    logger.info("Beginning GP minimization for constants...")
+    gp_start = time.time()
+    res = gp_minimize(objective_function, space, n_calls=n_calls, random_state=None,
+                      n_jobs=4, verbose=True, n_initial_points=min(40, n_calls//2), acq_func='EI',
+                      initial_point_generator='lhs')
+    gp_time = time.time() - gp_start
+    logger.info(f"GP minimization complete in {gp_time:.2f}s")
+    
+    # Extract results
+    best_constants = {
+        'tau_v': res.x[0],
+        'tau_w': res.x[1],
+        'a': res.x[2],
+        'b': res.x[3],
+        'v_scale': res.x[4],
+        'R_off': res.x[5],
+        'R_on': res.x[6],
+        'alpha': res.x[7],
+        'score': -res.fun
+    }
+    
+    # Apply final optimized constants to the environment
+    env.tau_v = best_constants['tau_v']
+    env.tau_w = best_constants['tau_w']
+    env.a = best_constants['a']
+    env.b = best_constants['b']
+    env.v_scale = best_constants['v_scale']
+    env.R_off = best_constants['R_off']
+    env.R_on = best_constants['R_on']
+    env.alpha = best_constants['alpha']
+    
+    # Convert all objective values back to scores for analysis
+    all_scores = -np.array(res.func_vals)
+    
+    total_time = time.time() - opt_start_time
+    
+    print(f"\n{'='*60}")
+    print("Constants Optimization Complete!")
+    print(f"{'='*60}")
+    print(f"Best Score: {best_constants['score']:.4f}")
+    print(f"Original Score: {best_stimulus_params['score']:.4f}")
+    print(f"Improvement: {best_constants['score'] - best_stimulus_params['score']:.4f}")
+    print(f"\nScore Statistics:")
+    print(f"  Min Score: {np.min(all_scores):.4f}")
+    print(f"  Max Score: {np.max(all_scores):.4f}")
+    print(f"  Mean Score: {np.mean(all_scores):.4f}")
+    print(f"  Std Score: {np.std(all_scores):.4f}")
+    print(f"\nOptimized Constants:")
+    print(f"  tau_v: {best_constants['tau_v']:.2f} ms (default: 50.0)")
+    print(f"  tau_w: {best_constants['tau_w']:.2f} ms (default: 800.0)")
+    print(f"  a: {best_constants['a']:.3f} (default: 0.7)")
+    print(f"  b: {best_constants['b']:.3f} (default: 0.8)")
+    print(f"  v_scale: {best_constants['v_scale']:.2f} (default: 5.0)")
+    print(f"  R_off: {best_constants['R_off']:.2f} Ω (default: 100.0)")
+    print(f"  R_on: {best_constants['R_on']:.2f} Ω (default: 10.0)")
+    print(f"  alpha: {best_constants['alpha']:.4f} (default: 0.01)")
+    print(f"{'='*60}\n")
+    
+    logger.info("="*60)
+    logger.info("CONSTANTS OPTIMIZATION COMPLETE")
+    logger.info(f"Total optimization time: {total_time:.2f}s")
+    logger.info(f"Best score achieved: {best_constants['score']:.4f}")
+    logger.info(f"Improvement over original: {best_constants['score'] - best_stimulus_params['score']:.4f}")
+    logger.info("="*60)
+    
+    return {'env': env, 'result': res, 'params': best_constants}
+
+
 def optimize_xor_gate(num_nodes: int = 30, n_calls: int = 15, 
                      random_state: int = 42,
-                     minimizer: str = 'gp') -> dict:
+                     minimizer: str = 'gp',
+                     tune_physics: bool = False) -> dict:
     """Optimize electrode placement for XOR gate implementation.
     
     Args:
@@ -459,14 +679,17 @@ def optimize_xor_gate(num_nodes: int = 30, n_calls: int = 15,
     # Run optimization
     logger.info("Beginning GP minimization...")
     gp_start = time.time()
-    res = gp_minimize(objective, space, n_calls=n_calls, random_state=random_state)
+    res = gp_minimize(objective, space, n_calls=n_calls, random_state=random_state,
+                      n_jobs=4, verbose=True, n_initial_points=40, acq_func='EI',
+                      initial_point_generator='lhs')
     if minimizer == 'forest':
         res = forest_minimize(objective, space, n_calls=n_calls, random_state=random_state,
-                              n_initial_points=100, initial_point_generator='lhs',
-                              acq_func='EI')
+                              n_initial_points=40, initial_point_generator='lhs',
+                              acq_func='EI', n_jobs=4)
     elif minimizer == 'gbrt':
         res = gbrt_minimize(objective, space, n_calls=n_calls,
-                            acq_func='EI', n_initial_points=100, initial_point_generator='lhs')
+                            acq_func='EI', n_initial_points=40, initial_point_generator='lhs',
+                            n_jobs=4)
     gp_time = time.time() - gp_start
     logger.info(f"GP minimization complete in {gp_time:.2f}s")
     
@@ -516,6 +739,24 @@ def optimize_xor_gate(num_nodes: int = 30, n_calls: int = 15,
     logger.info(f"Best output probe: ({best_params['x_out']:.2f}, {best_params['y_out']:.2f})")
     logger.info(f"Best voltage: {best_params['voltage']:.2f}V, duration: {best_params['duration']:.2f}ms, delay: {best_params['delay']:.2f}ms")
     logger.info("="*60)
+
+    if tune_physics:
+        print("\n" + "="*60)
+        print("Starting Physics Parameter Tuning...")
+        print("="*60)
+        tuned_results = optimize_fungal_constants(
+            best_stimulus_params=best_params,
+            env=env,
+            n_calls=n_calls
+        )
+        return {
+            'env': env, 
+            'result': res, 
+            'params': best_params,
+            'tuned_env': tuned_results['env'],
+            'tuned_params': tuned_results['params'],
+            'tuned_result': tuned_results['result']
+        }
     
     return {'env': env, 'result': res, 'params': best_params}
 
@@ -969,13 +1210,15 @@ def visualize_comprehensive(optimization_results: dict) -> None:
     
     ax3.set_title('XOR Truth Table', fontsize=11, fontweight='bold', pad=20)
     
-    # 4-7. All four XOR cases (middle row)
+    # 4-7. All four XOR cases (2x2 grid in rows 1-2, columns 0-1)
+    xor_positions = [(1, 0), (1, 1), (2, 0), (2, 1)]  # (row, col) for each case
     for idx, (electrodes, a, b) in enumerate(cases):
-        ax = fig.add_subplot(gs[1, idx if idx < 3 else 2])
-        if idx == 3:
-            ax = fig.add_subplot(gs[1, 2])
+        row, col = xor_positions[idx]
+        ax = fig.add_subplot(gs[row, col])
         
-        t, V = env.run_experiment(electrodes, params['voltage'], params['duration'])
+        # Use delay for (1,1) case
+        delays = [0.0, params['delay']] if (a == '1' and b == '1') else None
+        t, V = env.run_experiment(electrodes, params['voltage'], params['duration'], electrode_delays=delays)
         v_out = np.array([env.read_output_voltage(loc_out, V[i, :]) for i in range(len(V))])
         color = ['gray', 'red', 'blue', 'purple'][idx]
         
@@ -987,8 +1230,8 @@ def visualize_comprehensive(optimization_results: dict) -> None:
         ax.set_title(f'Input ({a},{b})', fontsize=10, fontweight='bold')
         ax.grid(True, alpha=0.3)
     
-    # 8. Memristor evolution (bottom left)
-    ax8 = fig.add_subplot(gs[2, 0])
+    # 8. Memristor evolution (middle right)
+    ax8 = fig.add_subplot(gs[1, 2])
     
     coupling_map = np.zeros(env.num_nodes)
     for pos in [loc_A, loc_B]:
@@ -1018,8 +1261,8 @@ def visualize_comprehensive(optimization_results: dict) -> None:
     ax8.set_title('Avg Memristor Evolution', fontsize=10, fontweight='bold')
     ax8.grid(True, alpha=0.3)
     
-    # 9. Parameter evolution (bottom middle)
-    ax9 = fig.add_subplot(gs[2, 1])
+    # 9. Parameter evolution (bottom right)
+    ax9 = fig.add_subplot(gs[2, 2])
     x_iters = res.x_iters
     voltages = [x[6] for x in x_iters]
     durations = [x[7] for x in x_iters]
@@ -1033,33 +1276,6 @@ def visualize_comprehensive(optimization_results: dict) -> None:
     ax9.set_title('Parameter Evolution', fontsize=10, fontweight='bold')
     ax9.grid(True, alpha=0.3)
     
-    # 10. Network statistics (bottom right)
-    ax10 = fig.add_subplot(gs[2, 2])
-    ax10.axis('off')
-    
-    degrees = [env.G.degree(n) for n in env.G.nodes()]
-    stats_data = [
-        ['Metric', 'Value'],
-        ['Nodes', f'{env.G.number_of_nodes()}'],
-        ['Edges', f'{env.G.number_of_edges()}'],
-        ['Avg Degree', f'{np.mean(degrees):.2f}'],
-        ['Best Score', f'{params["score"]:.4f}'],
-        ['Voltage', f'{params["voltage"]:.2f} V'],
-        ['Duration', f'{params["duration"]:.1f} ms'],
-    ]
-    
-    table2 = ax10.table(cellText=stats_data, cellLoc='left', loc='center',
-                       colWidths=[0.6, 0.4])
-    table2.auto_set_font_size(False)
-    table2.set_fontsize(9)
-    table2.scale(1, 2)
-    
-    for i in range(2):
-        table2[(0, i)].set_facecolor('#4CAF50')
-        table2[(0, i)].set_text_props(weight='bold', color='white')
-    
-    ax10.set_title('Summary Statistics', fontsize=10, fontweight='bold', pad=20)
-    
     fig.suptitle('Comprehensive Fungal Computer Analysis', 
                 fontsize=14, fontweight='bold', y=0.995)
     
@@ -1071,32 +1287,50 @@ if __name__ == "__main__":
     logger.info(f"Logging level: {logging.getLevelName(logger.level)}")
     
     # Run optimization
-    results = optimize_xor_gate(num_nodes=40, n_calls=200, random_state=42, minimizer='forest')
+    # Set tune_physics=True to enable two-level optimization (stimulus + constants)
+    tic = time.time()
+    results = optimize_xor_gate(num_nodes=40, n_calls=40, random_state=42, 
+                               minimizer='gp', tune_physics=True)
+    
+    # If constants were tuned, use the tuned environment for visualization
+    if 'tuned_env' in results:
+        print("\nUsing tuned environment for visualization...")
+        viz_results = {
+            'env': results['tuned_env'],
+            'params': {**results['params'], 'score': results['tuned_params']['score']},
+            'result': results['result']
+        }
+    else:
+        viz_results = results
+    
+    toc = time.time()
+    
+    print(f"Total optimization time: {toc - tic:.2f} seconds")
     
     # Choose your visualization(s):
     
     # Option 1: Basic view (network + single response)
-    # visualize_results(results)
+    # visualize_results(viz_results)
     
     # Option 2: All XOR cases comparison
-    # visualize_all_xor_cases(results)
+    visualize_all_xor_cases(viz_results)
     
     # Option 3: Optimization convergence analysis
-    # visualize_optimization_convergence(results)
+    # visualize_optimization_convergence(viz_results)
     
     # Option 4: Spatial coupling heatmaps
-    # visualize_spatial_coupling(results, resolution=100)
+    # visualize_spatial_coupling(viz_results, resolution=100)
     
     # Option 5: Memristor state evolution
-    # visualize_memristor_evolution(results)
+    visualize_memristor_evolution(viz_results)
     
     # Option 6: Network topology metrics
-    # visualize_network_metrics(results)
+    # visualize_network_metrics(viz_results)
     
     # Option 7: Comprehensive dashboard (all-in-one)
-    visualize_comprehensive(results)
+    visualize_comprehensive(viz_results)
     
     # You can also call multiple visualizations:
-    # visualize_all_xor_cases(results)
-    # visualize_optimization_convergence(results)
-    # visualize_spatial_coupling(results)
+    # visualize_all_xor_cases(viz_results)
+    # visualize_optimization_convergence(viz_results)
+    # visualize_spatial_coupling(viz_results)
