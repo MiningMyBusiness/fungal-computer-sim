@@ -4,6 +4,7 @@ import numpy as np
 import networkx as nx
 from scipy.integrate import odeint
 from scipy.spatial.distance import cdist
+from scipy.signal import find_peaks
 import matplotlib.pyplot as plt
 from skopt import gp_minimize, forest_minimize, gbrt_minimize
 from skopt.space import Real
@@ -11,7 +12,7 @@ from skopt.utils import use_named_args
 import warnings
 import logging
 import time
-from typing import List, Tuple, Callable, Optional
+from typing import List, Tuple, Callable, Optional, Dict
 
 warnings.filterwarnings("ignore")
 
@@ -319,6 +320,335 @@ class RealisticFungalComputer:
         # Return time array and voltage traces for all nodes
         return t, solution[:, :n]
 
+    def run_experiment_custom_stim(self, sim_time: float, 
+                                   stim_function: Callable[[float], np.ndarray],
+                                   time_step: float = DEFAULT_TIME_STEP) -> Tuple[np.ndarray, np.ndarray]:
+        """Run an experiment with a custom stimulation function.
+        
+        This method allows for arbitrary time-dependent stimulation patterns,
+        which is essential for system identification protocols.
+        
+        Args:
+            sim_time: Total simulation time (ms)
+            stim_function: Function that takes time (ms) and returns array of currents for each node
+            time_step: Time step for numerical integration (ms)
+            
+        Returns:
+            Tuple of (time_array, voltage_matrix) where voltage_matrix has shape (time_steps, num_nodes)
+        """
+        logger.info(f"Starting custom stimulation experiment: sim_time={sim_time}ms")
+        start_time = time.time()
+        
+        t = np.linspace(0, sim_time, int(sim_time / time_step))
+        logger.debug(f"Time array: {len(t)} points")
+        
+        # Set Initial Conditions
+        n = self.num_nodes
+        state_0 = np.concatenate([
+            DEFAULT_INITIAL_V * np.ones(n),
+            DEFAULT_INITIAL_W * np.ones(n),
+            DEFAULT_INITIAL_M * np.ones(len(self.edge_list))
+        ])
+        
+        # Solve ODE System
+        logger.debug("Starting ODE integration...")
+        ode_start = time.time()
+        solution = odeint(self.system_derivatives, state_0, t, args=(stim_function,))
+        ode_time = time.time() - ode_start
+        logger.debug(f"ODE integration complete in {ode_time:.3f}s")
+        
+        voltages = solution[:, :n]
+        v_min, v_max = np.min(voltages), np.max(voltages)
+        logger.info(f"Custom experiment complete: V_range=[{v_min:.3f}, {v_max:.3f}], total_time={time.time()-start_time:.3f}s")
+        
+        return t, solution[:, :n]
+
+    def step_response_protocol(self, voltage: float = 2.0, pulse_duration: float = 3000.0,
+                              probe_distance: float = 4.0, sim_time: float = 5000.0) -> Dict:
+        """Run a step response protocol for system identification.
+        
+        A single, long DC pulse is applied at the center, and the response is measured
+        at a probe electrode at a fixed distance. This characterizes:
+        - Rise time to saturation
+        - Saturation voltage
+        - Presence of oscillations before settling
+        
+        Args:
+            voltage: Stimulation voltage (V)
+            pulse_duration: Duration of the DC pulse (ms)
+            probe_distance: Distance from center to probe electrode (mm)
+            sim_time: Total simulation time (ms)
+            
+        Returns:
+            Dictionary containing:
+                - 'time': Time array
+                - 'response': Voltage response at probe
+                - 'rise_time': Time to reach 90% of saturation (ms)
+                - 'saturation_voltage': Final steady-state voltage (V)
+                - 'oscillation_index': Measure of oscillatory behavior (0=none, >0=oscillatory)
+                - 'center_pos': Center electrode position
+                - 'probe_pos': Probe electrode position
+        """
+        logger.info(f"Running step response protocol: V={voltage}V, duration={pulse_duration}ms, probe_dist={probe_distance}mm")
+        
+        # Fixed electrode positions: center and probe at distance
+        center = (self.area_size / 2, self.area_size / 2)
+        probe = (self.area_size / 2 + probe_distance, self.area_size / 2)
+        
+        # Define step stimulation function
+        pulse_start = 100.0  # ms
+        coupling_map = self.calculate_stimulation_coupling(center, voltage)
+        
+        def stim(t: float) -> np.ndarray:
+            if pulse_start < t < (pulse_start + pulse_duration):
+                return coupling_map
+            return np.zeros(self.num_nodes)
+        
+        # Run experiment
+        t, sol = self.run_experiment_custom_stim(sim_time, stim)
+        v_out = np.array([self.read_output_voltage(probe, sol[i, :]) for i in range(len(sol))])
+        
+        # Extract features
+        # 1. Saturation voltage (average of last 20% of response)
+        saturation_start_idx = int(0.8 * len(v_out))
+        saturation_voltage = np.mean(v_out[saturation_start_idx:])
+        
+        # 2. Rise time (time to reach 90% of saturation)
+        target_voltage = 0.9 * saturation_voltage
+        rise_idx = np.where(v_out >= target_voltage)[0]
+        if len(rise_idx) > 0:
+            rise_time = t[rise_idx[0]] - pulse_start
+        else:
+            rise_time = np.inf  # Never reached 90%
+        
+        # 3. Oscillation index (normalized standard deviation during settling)
+        # Look at the period from 50% rise to 95% of simulation
+        if len(rise_idx) > 0:
+            settling_start = rise_idx[0]
+            settling_end = int(0.95 * len(v_out))
+            settling_region = v_out[settling_start:settling_end]
+            if len(settling_region) > 0:
+                oscillation_index = np.std(settling_region) / (np.abs(saturation_voltage) + 1e-6)
+            else:
+                oscillation_index = 0.0
+        else:
+            oscillation_index = 0.0
+        
+        logger.info(f"Step response: rise_time={rise_time:.1f}ms, saturation={saturation_voltage:.3f}V, oscillation={oscillation_index:.4f}")
+        
+        return {
+            'time': t,
+            'response': v_out,
+            'rise_time': rise_time,
+            'saturation_voltage': saturation_voltage,
+            'oscillation_index': oscillation_index,
+            'center_pos': center,
+            'probe_pos': probe
+        }
+
+    def paired_pulse_protocol(self, voltage: float = 2.0, pulse_width: float = 50.0,
+                             probe_distance: float = 4.0, 
+                             delays: Optional[List[float]] = None) -> Dict:
+        """Run a paired-pulse protocol to characterize refractory period.
+        
+        Two short pulses separated by variable delay are applied at the center.
+        The ratio of the second pulse response to the first pulse response
+        indicates the recovery dynamics of the system.
+        
+        Args:
+            voltage: Stimulation voltage (V)
+            pulse_width: Width of each pulse (ms)
+            probe_distance: Distance from center to probe electrode (mm)
+            delays: List of inter-pulse intervals to test (ms). 
+                   Default: [200.0, 800.0, 2000.0]
+            
+        Returns:
+            Dictionary containing:
+                - 'delays': Array of tested inter-pulse intervals
+                - 'recovery_ratios': Ratio of 2nd peak / 1st peak for each delay
+                - 'first_peak_heights': Height of first peak for each delay
+                - 'second_peak_heights': Height of second peak for each delay
+                - 'center_pos': Center electrode position
+                - 'probe_pos': Probe electrode position
+        """
+        if delays is None:
+            delays = [200.0, 800.0, 2000.0]
+        
+        logger.info(f"Running paired-pulse protocol: V={voltage}V, pulse_width={pulse_width}ms, delays={delays}")
+        
+        # Fixed electrode positions
+        center = (self.area_size / 2, self.area_size / 2)
+        probe = (self.area_size / 2 + probe_distance, self.area_size / 2)
+        
+        recovery_ratios = []
+        first_peaks = []
+        second_peaks = []
+        
+        for dt in delays:
+            logger.debug(f"Testing inter-pulse interval: {dt}ms")
+            
+            # Define paired-pulse stimulation
+            pulse_start = 100.0  # ms
+            coupling_map = self.calculate_stimulation_coupling(center, voltage)
+            
+            def stim(t: float) -> np.ndarray:
+                # First pulse
+                if pulse_start < t < (pulse_start + pulse_width):
+                    return coupling_map
+                # Second pulse (after delay)
+                if (pulse_start + pulse_width + dt) < t < (pulse_start + 2 * pulse_width + dt):
+                    return coupling_map
+                return np.zeros(self.num_nodes)
+            
+            # Run experiment (need enough time for both pulses)
+            sim_time = pulse_start + 2 * pulse_width + dt + 1000.0
+            t, sol = self.run_experiment_custom_stim(sim_time, stim)
+            v_out = np.array([self.read_output_voltage(probe, sol[i, :]) for i in range(len(sol))])
+            
+            # Find peaks in the response
+            # Use a minimum height threshold and minimum distance between peaks
+            peaks, properties = find_peaks(v_out, height=0.1, distance=int(20.0 / DEFAULT_TIME_STEP))
+            
+            if len(peaks) >= 2:
+                # Take the two highest peaks
+                peak_heights = v_out[peaks]
+                sorted_indices = np.argsort(peak_heights)[-2:]  # Get indices of 2 highest peaks
+                sorted_peaks = peaks[sorted_indices]
+                sorted_peaks = sorted_peaks[np.argsort(sorted_peaks)]  # Sort by time
+                
+                first_peak_height = v_out[sorted_peaks[0]]
+                second_peak_height = v_out[sorted_peaks[1]]
+                
+                ratio = second_peak_height / (first_peak_height + 1e-9)  # Avoid division by zero
+                recovery_ratios.append(ratio)
+                first_peaks.append(first_peak_height)
+                second_peaks.append(second_peak_height)
+                
+                logger.debug(f"Delay {dt}ms: 1st peak={first_peak_height:.3f}V, 2nd peak={second_peak_height:.3f}V, ratio={ratio:.3f}")
+            else:
+                # Second pulse didn't fire (refractory!)
+                recovery_ratios.append(0.0)
+                first_peaks.append(v_out[peaks[0]] if len(peaks) > 0 else 0.0)
+                second_peaks.append(0.0)
+                logger.debug(f"Delay {dt}ms: Only {len(peaks)} peak(s) detected - refractory period!")
+        
+        logger.info(f"Paired-pulse complete: recovery_ratios={recovery_ratios}")
+        
+        return {
+            'delays': np.array(delays),
+            'recovery_ratios': np.array(recovery_ratios),
+            'first_peak_heights': np.array(first_peaks),
+            'second_peak_heights': np.array(second_peaks),
+            'center_pos': center,
+            'probe_pos': probe
+        }
+
+    def triangle_sweep_protocol(self, v_max: float = 5.0, sweep_rate: float = 0.01,
+                               probe_distance: float = 4.0) -> Dict:
+        """Run a triangle sweep (cyclic voltammetry) protocol.
+        
+        Slowly ramp voltage from 0 to +v_max, then down to -v_max, measuring
+        the current-voltage relationship. The area within the V-I curve indicates
+        plasticity: a fat loop means high plasticity, a thin line means static resistor.
+        
+        Args:
+            v_max: Maximum voltage magnitude (V)
+            sweep_rate: Voltage sweep rate (V/ms)
+            probe_distance: Distance from center to probe electrode (mm)
+            
+        Returns:
+            Dictionary containing:
+                - 'time': Time array
+                - 'voltage_applied': Applied voltage at each time point
+                - 'current_response': Current response at probe
+                - 'hysteresis_area': Area enclosed by the V-I curve (measure of plasticity)
+                - 'center_pos': Center electrode position
+                - 'probe_pos': Probe electrode position
+        """
+        logger.info(f"Running triangle sweep protocol: v_max={v_max}V, sweep_rate={sweep_rate}V/ms")
+        
+        # Fixed electrode positions
+        center = (self.area_size / 2, self.area_size / 2)
+        probe = (self.area_size / 2 + probe_distance, self.area_size / 2)
+        
+        # Calculate sweep timing
+        # Phase 1: 0 -> +v_max
+        # Phase 2: +v_max -> -v_max
+        # Phase 3: -v_max -> 0
+        t1 = v_max / sweep_rate  # Time to reach +v_max
+        t2 = (2 * v_max) / sweep_rate  # Time to sweep from +v_max to -v_max
+        t3 = v_max / sweep_rate  # Time to return to 0
+        total_sweep_time = t1 + t2 + t3
+        
+        # Add buffer time before and after
+        buffer_time = 200.0  # ms
+        sim_time = buffer_time + total_sweep_time + buffer_time
+        
+        logger.debug(f"Sweep timing: t1={t1:.1f}ms, t2={t2:.1f}ms, t3={t3:.1f}ms, total={sim_time:.1f}ms")
+        
+        # Define triangle wave stimulation
+        def triangle_voltage(t: float) -> float:
+            """Generate triangle wave voltage."""
+            t_rel = t - buffer_time  # Time relative to sweep start
+            
+            if t_rel < 0:
+                return 0.0
+            elif t_rel < t1:
+                # Ramp up: 0 -> +v_max
+                return sweep_rate * t_rel
+            elif t_rel < (t1 + t2):
+                # Ramp down: +v_max -> -v_max
+                return v_max - sweep_rate * (t_rel - t1)
+            elif t_rel < (t1 + t2 + t3):
+                # Ramp up: -v_max -> 0
+                return -v_max + sweep_rate * (t_rel - t1 - t2)
+            else:
+                return 0.0
+        
+        def stim(t: float) -> np.ndarray:
+            v = triangle_voltage(t)
+            return self.calculate_stimulation_coupling(center, v)
+        
+        # Run experiment
+        t, sol = self.run_experiment_custom_stim(sim_time, stim)
+        
+        # Calculate applied voltage and response current at each time point
+        voltage_applied = np.array([triangle_voltage(ti) for ti in t])
+        v_out = np.array([self.read_output_voltage(probe, sol[i, :]) for i in range(len(sol))])
+        
+        # Approximate current as derivative of voltage (I ≈ C * dV/dt)
+        # Use simple finite difference
+        dt = t[1] - t[0]
+        current_response = np.gradient(v_out, dt)
+        
+        # Calculate hysteresis area using the shoelace formula
+        # Only consider the main sweep region (exclude buffers)
+        sweep_start_idx = int(buffer_time / DEFAULT_TIME_STEP)
+        sweep_end_idx = int((buffer_time + total_sweep_time) / DEFAULT_TIME_STEP)
+        
+        v_sweep = voltage_applied[sweep_start_idx:sweep_end_idx]
+        i_sweep = current_response[sweep_start_idx:sweep_end_idx]
+        
+        # Calculate area using trapezoidal rule
+        # Area = integral of I dV
+        # Use trapezoid (NumPy 2.0+) or trapz (older versions) for compatibility
+        try:
+            hysteresis_area = np.abs(np.trapezoid(i_sweep, v_sweep))
+        except AttributeError:
+            hysteresis_area = np.abs(np.trapz(i_sweep, v_sweep))
+        
+        logger.info(f"Triangle sweep complete: hysteresis_area={hysteresis_area:.4f}")
+        
+        return {
+            'time': t,
+            'voltage_applied': voltage_applied,
+            'current_response': current_response,
+            'voltage_response': v_out,
+            'hysteresis_area': hysteresis_area,
+            'center_pos': center,
+            'probe_pos': probe
+        }
+
 # ==========================================
 # Bayesian Optimization for XOR Gate
 # ==========================================
@@ -462,10 +792,10 @@ def optimize_fungal_constants(best_stimulus_params: dict,
         Real(30.0, 150.0, name='tau_v'),      # Voltage time constant (ms)
         Real(300.0, 1600.0, name='tau_w'),    # Recovery variable time constant (ms)
         Real(0.5, 0.8, name='a'),             # FHN parameter a
-        Real(0.7, 1.2, name='b'),             # FHN parameter b
-        Real(0.5, 5.0, name='v_scale'),      # Voltage scaling factor
+        Real(0.7, 1.0, name='b'),             # FHN parameter b
+        Real(0.5, 10.0, name='v_scale'),      # Voltage scaling factor
         Real(50.0, 300.0, name='R_off'),      # High resistance state (Ohms)
-        Real(20.0, 50.0, name='R_on'),         # Low resistance state (Ohms)
+        Real(2.0, 50.0, name='R_on'),         # Low resistance state (Ohms)
         Real(0.0001, 0.02, name='alpha')       # Memristor adaptation rate
     ]
     

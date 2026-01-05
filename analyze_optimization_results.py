@@ -11,6 +11,7 @@ comprehensive analysis to identify general principles for:
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 import seaborn as sns
 from pathlib import Path
 from scipy import stats
@@ -25,27 +26,59 @@ plt.rcParams['figure.figsize'] = (12, 8)
 # ==========================================
 
 def load_latest_results(results_dir="optimization_study_results"):
-    """Load the most recent results file."""
-    results_path = Path(results_dir)
-    csv_files = list(results_path.glob("optimization_results_*.csv"))
+    """Load the most recent results file.
     
+    Attempts to load from optimization_results_*.csv files first.
+    If none are found, falls back to checkpoint_*.csv files.
+    
+    Args:
+        results_dir: Directory containing results files
+        
+    Returns:
+        Tuple of (dataframe, config_dict)
+    """
+    results_path = Path(results_dir)
+    
+    # Try to find optimization_results files first
+    csv_files = list(results_path.glob("optimization_results_*.csv"))
+    file_type = "optimization_results"
+    
+    # Fall back to checkpoint files if no results files found
     if not csv_files:
-        raise FileNotFoundError(f"No results files found in {results_dir}")
+        csv_files = list(results_path.glob("checkpoint_*.csv"))
+        file_type = "checkpoint"
+        
+        if not csv_files:
+            raise FileNotFoundError(
+                f"No results files found in {results_dir}\n"
+                f"Looked for: optimization_results_*.csv and checkpoint_*.csv"
+            )
+        
+        print(f"Note: No optimization_results files found, loading from checkpoint instead")
     
     # Get the most recent file
     latest_file = max(csv_files, key=lambda p: p.stat().st_mtime)
-    print(f"Loading results from: {latest_file}")
+    print(f"Loading {file_type} from: {latest_file}")
     
     df = pd.read_csv(latest_file)
     
     # Load corresponding config if available
-    timestamp = latest_file.stem.split('_', 2)[2]
+    # Extract timestamp from filename (e.g., "optimization_results_20231230_123456.csv" or "checkpoint_20231230_123456.csv")
+    timestamp = latest_file.stem.split('_', 1)[1] if file_type == "checkpoint" else latest_file.stem.split('_', 2)[2]
     config_file = results_path / f"study_config_{timestamp}.json"
     config = None
     if config_file.exists():
         with open(config_file, 'r') as f:
             config = json.load(f)
         print(f"Loaded configuration from: {config_file}")
+    else:
+        print(f"Note: Configuration file not found: {config_file}")
+    
+    # If loading from checkpoint, inform user about data completeness
+    if file_type == "checkpoint":
+        successful_trials = df[df.get('success', True) == True]
+        print(f"Checkpoint contains {len(df)} trials ({len(successful_trials)} successful)")
+        print("Note: This is an in-progress study. Results may be incomplete.")
     
     return df, config
 
@@ -290,6 +323,7 @@ def create_visualizations(df, output_dir="optimization_study_results"):
     axes[0, 0].scatter(successful['num_nodes'], successful['score'], alpha=0.5)
     axes[0, 0].set_xlabel('Number of Nodes')
     axes[0, 0].set_ylabel('Score')
+    axes[0, 0].set_yscale('log')
     axes[0, 0].set_title('Performance vs Network Size')
     
     # Box plot by node count
@@ -298,6 +332,7 @@ def create_visualizations(df, output_dir="optimization_study_results"):
     axes[0, 1].boxplot(score_by_nodes, labels=node_counts)
     axes[0, 1].set_xlabel('Number of Nodes')
     axes[0, 1].set_ylabel('Score')
+    axes[0, 1].set_yscale('log')
     axes[0, 1].set_title('Score Distribution by Network Size')
     axes[0, 1].tick_params(axis='x', rotation=45)
     
@@ -305,6 +340,7 @@ def create_visualizations(df, output_dir="optimization_study_results"):
     axes[1, 0].scatter(successful['network_density'], successful['score'], alpha=0.5)
     axes[1, 0].set_xlabel('Network Density')
     axes[1, 0].set_ylabel('Score')
+    axes[1, 0].set_yscale('log')
     axes[1, 0].set_title('Performance vs Network Density')
     
     # Tuned vs original scores
@@ -316,6 +352,8 @@ def create_visualizations(df, output_dir="optimization_study_results"):
                        'r--', label='No improvement')
         axes[1, 1].set_xlabel('Original Score')
         axes[1, 1].set_ylabel('Tuned Score')
+        axes[1, 1].set_xscale('log')
+        axes[1, 1].set_yscale('log')
         axes[1, 1].set_title('Physics Tuning Effect')
         axes[1, 1].legend()
     
@@ -334,6 +372,7 @@ def create_visualizations(df, output_dir="optimization_study_results"):
         ax.scatter(successful[col], successful['score'], alpha=0.5)
         ax.set_xlabel(f'{col} (mm)')
         ax.set_ylabel('Score')
+        ax.set_yscale('log')
         ax.set_title(f'Score vs {col}')
     
     plt.tight_layout()
@@ -348,21 +387,25 @@ def create_visualizations(df, output_dir="optimization_study_results"):
     axes[0, 0].scatter(successful['voltage'], successful['score'], alpha=0.5)
     axes[0, 0].set_xlabel('Voltage (V)')
     axes[0, 0].set_ylabel('Score')
+    axes[0, 0].set_yscale('log')
     axes[0, 0].set_title('Score vs Voltage')
     
     axes[0, 1].scatter(successful['duration'], successful['score'], alpha=0.5)
     axes[0, 1].set_xlabel('Duration (ms)')
     axes[0, 1].set_ylabel('Score')
+    axes[0, 1].set_yscale('log')
     axes[0, 1].set_title('Score vs Pulse Duration')
     
     axes[1, 0].scatter(successful['delay'], successful['score'], alpha=0.5)
     axes[1, 0].set_xlabel('Delay (ms)')
     axes[1, 0].set_ylabel('Score')
+    axes[1, 0].set_yscale('log')
     axes[1, 0].set_title('Score vs Electrode Delay')
     
     # Voltage vs duration colored by score
     scatter = axes[1, 1].scatter(successful['voltage'], successful['duration'], 
-                                 c=successful['score'], cmap='viridis', alpha=0.6)
+                                 c=successful['score'], cmap='viridis', alpha=0.6,
+                                 norm=mcolors.LogNorm())
     axes[1, 1].set_xlabel('Voltage (V)')
     axes[1, 1].set_ylabel('Duration (ms)')
     axes[1, 1].set_title('Voltage-Duration Space (colored by score)')
@@ -400,6 +443,7 @@ def create_visualizations(df, output_dir="optimization_study_results"):
                 
                 axes[idx].set_xlabel(f'{param}')
                 axes[idx].set_ylabel('Tuned Score')
+                axes[idx].set_yscale('log')
                 axes[idx].set_title(f'Tuned Score vs {param}')
                 axes[idx].legend()
         
@@ -431,6 +475,7 @@ def create_visualizations(df, output_dir="optimization_study_results"):
             axes[idx].scatter(successful[prop], successful['score'], alpha=0.5, color='purple')
             axes[idx].set_xlabel(prop.replace('_', ' ').title())
             axes[idx].set_ylabel('Score')
+            axes[idx].set_yscale('log')
             axes[idx].set_title(f'Score vs {prop.replace("_", " ").title()}')
             
             # Add correlation coefficient to plot
@@ -599,8 +644,17 @@ def main():
     df, config = load_latest_results()
     
     print(f"\nLoaded {len(df)} trials")
+    
+    # Filter out scores lower than 10^-5
+    original_count = len(df)
+    df = df[df['score'] >= 1e-5].copy()
+    filtered_count = original_count - len(df)
+    if filtered_count > 0:
+        print(f"Filtered out {filtered_count} trials with score < 10^-5")
+    print(f"Analyzing {len(df)} trials")
+    
     if config:
-        print(f"Study configuration:")
+        print(f"\nStudy configuration:")
         for key, value in config.items():
             print(f"  {key}: {value}")
     

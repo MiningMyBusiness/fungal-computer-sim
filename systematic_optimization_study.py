@@ -18,6 +18,8 @@ from realistic_sim import optimize_xor_gate
 import networkx as nx
 from networkx.algorithms import community
 import logging
+import argparse
+import glob
 
 # Configure logging
 logging.basicConfig(
@@ -34,14 +36,14 @@ logger = logging.getLogger(__name__)
 # Node density study: systematic progression
 # Start sparse, gradually increase density
 NODE_COUNTS = [
-    # Sparse networks
-    20, 25, 30,
+    # Sparse network
+    20,
     # Medium density
-    35, 40, 45, 50,
+    40,
     # Higher density
-    60, 70, 80,
+    60, 80,
     # Dense networks
-    100, 120, 150
+    100, 120
 ]
 
 # Number of random trials per node count
@@ -218,40 +220,109 @@ def save_checkpoint(results_df, checkpoint_path):
     results_df.to_csv(checkpoint_path, index=False)
     logger.info(f"Checkpoint saved: {checkpoint_path}")
 
+def find_latest_checkpoint():
+    """Find the most recent checkpoint file in the output directory.
+    
+    Returns:
+        Path to checkpoint file or None if no checkpoint exists
+    """
+    checkpoint_files = list(OUTPUT_DIR.glob("checkpoint_*.csv"))
+    if not checkpoint_files:
+        return None
+    
+    # Sort by modification time, most recent first
+    checkpoint_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return checkpoint_files[0]
+
+def load_checkpoint(checkpoint_path):
+    """Load checkpoint data and determine completed trials.
+    
+    Args:
+        checkpoint_path: Path to checkpoint CSV file
+        
+    Returns:
+        Tuple of (results_df, completed_trials_set)
+        where completed_trials_set contains (num_nodes, trial_idx) tuples
+    """
+    logger.info(f"Loading checkpoint from: {checkpoint_path}")
+    results_df = pd.read_csv(checkpoint_path)
+    
+    # Get set of completed trials (only successful ones)
+    completed_trials = set()
+    for _, row in results_df.iterrows():
+        if row.get('success', False):
+            completed_trials.add((int(row['num_nodes']), int(row['trial_idx'])))
+    
+    logger.info(f"Loaded {len(results_df)} previous results ({len(completed_trials)} successful trials)")
+    return results_df, completed_trials
+
 # ==========================================
 # Main Study Loop
 # ==========================================
 
-def run_systematic_study():
-    """Run the systematic optimization study."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+def run_systematic_study(resume=False):
+    """Run the systematic optimization study.
+    
+    Args:
+        resume: If True, attempt to resume from the most recent checkpoint
+    """
+    # Handle resume logic
+    completed_trials = set()
+    all_results = []
+    
+    if resume:
+        checkpoint_path = find_latest_checkpoint()
+        if checkpoint_path:
+            try:
+                results_df, completed_trials = load_checkpoint(checkpoint_path)
+                all_results = results_df.to_dict('records')
+                
+                # Extract timestamp from checkpoint filename to continue with same session
+                checkpoint_name = checkpoint_path.stem  # e.g., "checkpoint_20231230_123456"
+                timestamp = checkpoint_name.replace('checkpoint_', '')
+                logger.info(f"Resuming study session: {timestamp}")
+            except Exception as e:
+                logger.error(f"Failed to load checkpoint: {e}")
+                logger.info("Starting fresh study instead")
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        else:
+            logger.info("No checkpoint found. Starting fresh study.")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
     results_file = OUTPUT_DIR / f"optimization_results_{timestamp}.csv"
     checkpoint_file = OUTPUT_DIR / f"checkpoint_{timestamp}.csv"
     config_file = OUTPUT_DIR / f"study_config_{timestamp}.json"
     
-    # Save study configuration
-    config = {
-        'node_counts': NODE_COUNTS,
-        'trials_per_config': TRIALS_PER_CONFIG,
-        'n_calls': N_CALLS,
-        'tune_physics': TUNE_PHYSICS,
-        'total_trials': len(NODE_COUNTS) * TRIALS_PER_CONFIG,
-        'timestamp': timestamp,
-    }
-    with open(config_file, 'w') as f:
-        json.dump(config, f, indent=2)
-    logger.info(f"Study configuration saved: {config_file}")
-    
-    # Initialize results storage
-    all_results = []
+    # Save study configuration (only if starting fresh)
+    if not config_file.exists():
+        config = {
+            'node_counts': NODE_COUNTS,
+            'trials_per_config': TRIALS_PER_CONFIG,
+            'n_calls': N_CALLS,
+            'tune_physics': TUNE_PHYSICS,
+            'total_trials': len(NODE_COUNTS) * TRIALS_PER_CONFIG,
+            'timestamp': timestamp,
+            'resumed': resume and len(completed_trials) > 0,
+        }
+        with open(config_file, 'w') as f:
+            json.dump(config, f, indent=2)
+        logger.info(f"Study configuration saved: {config_file}")
     
     # Calculate total number of trials
     total_trials = len(NODE_COUNTS) * TRIALS_PER_CONFIG
     current_trial = 0
     
     logger.info("="*70)
-    logger.info("STARTING SYSTEMATIC OPTIMIZATION STUDY")
-    logger.info("="*70)
+    if completed_trials:
+        logger.info("RESUMING SYSTEMATIC OPTIMIZATION STUDY")
+        logger.info("="*70)
+        logger.info(f"Previously completed trials: {len(completed_trials)}/{total_trials}")
+        logger.info(f"Remaining trials: {total_trials - len(completed_trials)}")
+    else:
+        logger.info("STARTING SYSTEMATIC OPTIMIZATION STUDY")
+        logger.info("="*70)
     logger.info(f"Node counts to test: {NODE_COUNTS}")
     logger.info(f"Trials per configuration: {TRIALS_PER_CONFIG}")
     logger.info(f"Total trials: {total_trials}")
@@ -271,6 +342,11 @@ def run_systematic_study():
         # Run multiple trials with different random seeds
         for trial_idx in range(TRIALS_PER_CONFIG):
             current_trial += 1
+            
+            # Skip if this trial was already completed
+            if (num_nodes, trial_idx) in completed_trials:
+                logger.info(f"Skipping completed trial {current_trial}/{total_trials}: num_nodes={num_nodes}, trial={trial_idx+1}/{TRIALS_PER_CONFIG}")
+                continue
             
             # Generate random seed for this trial
             random_state = np.random.randint(0, 100000)
@@ -380,18 +456,57 @@ def run_systematic_study():
 # ==========================================
 
 if __name__ == "__main__":
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description='Systematic XOR gate optimization study',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  # Start a new study
+  python systematic_optimization_study.py
+  
+  # Resume from the most recent checkpoint
+  python systematic_optimization_study.py --resume
+        """
+    )
+    parser.add_argument(
+        '--resume',
+        action='store_true',
+        help='Resume from the most recent checkpoint if available'
+    )
+    parser.add_argument(
+        '--yes', '-y',
+        action='store_true',
+        help='Skip confirmation prompt and start immediately'
+    )
+    args = parser.parse_args()
+    
     print("\n" + "="*70)
     print("SYSTEMATIC XOR GATE OPTIMIZATION STUDY")
     print("="*70)
+    
+    # Check for existing checkpoint if resume is requested
+    if args.resume:
+        checkpoint_path = find_latest_checkpoint()
+        if checkpoint_path:
+            print(f"Found checkpoint: {checkpoint_path.name}")
+            print("Will resume from this checkpoint.")
+        else:
+            print("No checkpoint found. Will start a new study.")
+    
     print(f"This study will run {len(NODE_COUNTS) * TRIALS_PER_CONFIG} optimization trials")
     print(f"Node counts: {NODE_COUNTS}")
     print(f"Trials per configuration: {TRIALS_PER_CONFIG}")
     print(f"Physics tuning: {'ENABLED' if TUNE_PHYSICS else 'DISABLED'}")
     print("="*70)
     
-    response = input("\nProceed with study? (yes/no): ")
-    if response.lower() in ['yes', 'y']:
-        results_df = run_systematic_study()
+    if args.yes:
+        proceed = True
+    else:
+        response = input("\nProceed with study? (yes/no): ")
+        proceed = response.lower() in ['yes', 'y']
+    
+    if proceed:
+        results_df = run_systematic_study(resume=args.resume)
         print("\nStudy completed successfully!")
         print(f"Results saved to: {OUTPUT_DIR}")
     else:

@@ -1,0 +1,66 @@
+{
+  "node_counts": [
+    20,
+    40,
+    60
+  ],
+  "trials_per_node_count": 10,
+  "total_trials": 30,
+  "param_ranges": {
+    "tau_v": [
+      30.0,
+      150.0
+    ],
+    "tau_w": [
+      300.0,
+      1600.0
+    ],
+    "a": [
+      0.5,
+      0.8
+    ],
+    "b": [
+      0.7,
+      1.0
+    ],
+    "v_scale": [
+      0.5,
+      10.0
+    ],
+    "R_off": [
+      50.0,
+      300.0
+    ],
+    "R_on": [
+      2.0,
+      50.0
+    ],
+    "alpha": [
+      0.0001,
+      0.02
+    ]
+  },
+  "step_response_params": {
+    "voltage": 2.0,
+    "pulse_duration": 3000.0,
+    "probe_distance": 5.0,
+    "sim_time": 5000.0
+  },
+  "paired_pulse_params": {
+    "voltage": 2.0,
+    "pulse_width": 50.0,
+    "probe_distance": 5.0,
+    "delays": [
+      200.0,
+      800.0,
+      2000.0
+    ]
+  },
+  "triangle_sweep_params": {
+    "v_max": 5.0,
+    "sweep_rate": 0.01,
+    "probe_distance": 5.0
+  },
+  "timestamp": "20260105_144554",
+  "resumed": false
+}
