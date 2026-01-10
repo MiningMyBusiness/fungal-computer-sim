@@ -1619,7 +1619,7 @@ if __name__ == "__main__":
     # Run optimization
     # Set tune_physics=True to enable two-level optimization (stimulus + constants)
     tic = time.time()
-    results = optimize_xor_gate(num_nodes=40, n_calls=40, random_state=42, 
+    results = optimize_xor_gate(num_nodes=50, n_calls=5, random_state=42, 
                                minimizer='gp', tune_physics=True)
     
     # If constants were tuned, use the tuned environment for visualization

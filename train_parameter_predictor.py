@@ -105,16 +105,28 @@ def load_and_preprocess_data(csv_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame
     X = df_success[available_features].copy()
     y = df_success[TARGET_PARAMS].copy()
     
-    # Handle any remaining NaN values
+    # Handle any remaining NaN and inf values
     print(f"\nFeature matrix shape: {X.shape}")
     print(f"Target matrix shape: {y.shape}")
     
-    # Check for NaN values
+    # Replace inf with NaN for easier handling
+    X = X.replace([np.inf, -np.inf], np.nan)
+    y = y.replace([np.inf, -np.inf], np.nan)
+    
+    # Check for NaN values (including converted inf values)
     nan_features = X.isna().sum()
+    nan_targets = y.isna().sum()
+    
     if nan_features.any():
-        print("\nNaN values in features:")
+        print("\nNaN/inf values in features:")
         print(nan_features[nan_features > 0])
-        print("Dropping rows with NaN values...")
+    
+    if nan_targets.any():
+        print("\nNaN/inf values in targets:")
+        print(nan_targets[nan_targets > 0])
+    
+    if nan_features.any() or nan_targets.any():
+        print("Dropping rows with NaN/inf values...")
         valid_idx = X.notna().all(axis=1) & y.notna().all(axis=1)
         X = X[valid_idx]
         y = y[valid_idx]

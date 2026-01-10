@@ -494,6 +494,30 @@ def create_visualizations(df, output_dir="optimization_study_results"):
         print(f"Saved: {fig_path}")
         plt.close()
     
+    # Figure 6: Tuned tau_w vs network density
+    tuned = successful[successful['tuned_score'].notna()]
+    if len(tuned) > 0 and 'tuned_tau_w' in tuned.columns:
+        fig, ax = plt.subplots(1, 1, figsize=(10, 7))
+        
+        ax.scatter(tuned['network_density'], tuned['tuned_tau_w'], alpha=0.6, s=50, color='steelblue')
+        ax.set_xlabel(r'Network Density ($\rho$)', fontsize=12)
+        ax.set_ylabel(r'Tuned $\tau_w$', fontsize=12)
+        ax.set_title(r'Tuned $\tau_w$ vs Network Density', fontsize=14)
+        ax.grid(True, alpha=0.3)
+        
+        # Add correlation coefficient
+        if len(tuned) > 1:
+            corr, p_value = stats.pearsonr(tuned['network_density'], tuned['tuned_tau_w'])
+            ax.text(0.05, 0.95, f'r={corr:.3f}, p={p_value:.4f}',
+                   transform=ax.transAxes, verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        plt.tight_layout()
+        fig_path = output_path / "tuned_tau_w_vs_density.png"
+        plt.savefig(fig_path, dpi=300, bbox_inches='tight')
+        print(f"Saved: {fig_path}")
+        plt.close()
+    
     print("Visualization complete!")
 
 def generate_summary_report(df, output_dir="optimization_study_results"):

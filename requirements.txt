@@ -5,3 +5,8 @@ scikit-optimize
 matplotlib
 seaborn
 Pillow
+pandas
+scikit-learn
+xgboost
+lightgbm
+joblib
