@@ -139,6 +139,14 @@ class RealisticFungalComputer:
         W = state[n:2*n]
         M = state[2*n:2*n+e]
         
+        # Safety check: if voltages have exploded, return zero derivatives to stop integration
+        if not np.all(np.isfinite(V)) or np.max(np.abs(V)) > 5.0:
+            return np.zeros_like(state)
+        if not np.all(np.isfinite(W)) or np.max(np.abs(W)) > 5.0:
+            return np.zeros_like(state)
+        if not np.all(np.isfinite(M)):
+            return np.zeros_like(state)
+        
         # Edge Conductance (memristor-dependent)
         conductances = 1.0 / (self.R_on * M + self.R_off * (1.0 - M))
         
@@ -692,6 +700,10 @@ def create_xor_objective(env: RealisticFungalComputer) -> Callable:
         logger.debug(f"Evaluating configuration: A=({x_A:.2f},{y_A:.2f}), B=({x_B:.2f},{y_B:.2f}), Out=({x_out:.2f},{y_out:.2f})")
         eval_start = time.time()
         
+        # Safety check: reject excessively high voltages
+        if voltage > 4.5:
+            return 1000.0  # Penalty for unrealistic voltage
+        
         # Define electrode and probe locations
         loc_A = (x_A, y_A)
         loc_B = (x_B, y_B)
@@ -702,12 +714,24 @@ def create_xor_objective(env: RealisticFungalComputer) -> Callable:
         # Case (1, 0): Only A active
         _, sol_10 = env.run_experiment([loc_A], voltage, duration)
         v_10 = np.max([env.read_output_voltage(loc_out, sol_10[i, :]) for i in range(len(sol_10))])
+        # if v_10 is nan or inf, then set score to 1000 (high value to be rejected)
+        if np.isnan(v_10) or np.isinf(v_10):
+            return 1000.0
+        # Check for voltage explosion in raw node voltages (FHN should stay within [-3, 3])
+        if np.max(np.abs(sol_10[:, :env.num_nodes])) > 3.0:
+            return 1000.0
         logger.debug(f"Case (1,0): max_V={v_10:.4f}")
         
         logger.debug("Running XOR case (0,1)...")
         # Case (0, 1): Only B active
         _, sol_01 = env.run_experiment([loc_B], voltage, duration)
         v_01 = np.max([env.read_output_voltage(loc_out, sol_01[i, :]) for i in range(len(sol_01))])
+        # if v_01 is nan or inf, then set score to 1000 (high value to be rejected)
+        if np.isnan(v_01) or np.isinf(v_01):
+            return 1000.0
+        # Check for voltage explosion in raw node voltages
+        if np.max(np.abs(sol_01[:, :env.num_nodes])) > 3.0:
+            return 1000.0
         logger.debug(f"Case (0,1): max_V={v_01:.4f}")
         
         logger.debug(f"Running XOR case (1,1) with delay={delay:.2f}ms...")
@@ -715,18 +739,35 @@ def create_xor_objective(env: RealisticFungalComputer) -> Callable:
         # Electrode A starts at default time (0 delay), electrode B starts at delay
         _, sol_11 = env.run_experiment([loc_A, loc_B], voltage, duration, electrode_delays=[0.0, delay])
         v_11 = np.max([env.read_output_voltage(loc_out, sol_11[i, :]) for i in range(len(sol_11))])
+        # if v_11 is nan or inf, then set score to 1000 (high value to be rejected)
+        if np.isnan(v_11) or np.isinf(v_11):
+            return 1000.0
+        # Check for voltage explosion in raw node voltages
+        if np.max(np.abs(sol_11[:, :env.num_nodes])) > 3.0:
+            return 1000.0
         logger.debug(f"Case (1,1): max_V={v_11:.4f}")
         
         logger.debug("Running XOR case (0,0)...")
         # Case (0, 0): Neither active
         _, sol_00 = env.run_experiment([], voltage, duration)
         v_00 = np.max([env.read_output_voltage(loc_out, sol_00[i, :]) for i in range(len(sol_00))])
+        # if v_00 is nan or inf, then set score to 1000 (high value to be rejected)
+        if np.isnan(v_00) or np.isinf(v_00):
+            return 1000.0
+        # Check for voltage explosion in raw node voltages
+        if np.max(np.abs(sol_00[:, :env.num_nodes])) > 3.0:
+            return 1000.0
         logger.debug(f"Case (0,0): max_V={v_00:.4f}")
 
         # XOR Score: maximize separation between high (10, 01) and low (00, 11) outputs
         min_high = min(v_10, v_01)
         max_low = max(v_00, v_11)
         score = min_high - max_low
+        
+        # Penalize if any individual voltage magnitude is too large (> 2.0V is unrealistic)
+        max_voltage = max(abs(v_10), abs(v_01), abs(v_11), abs(v_00))
+        if max_voltage > 2.0:
+            return 1000.0  # Penalty for unrealistic voltage magnitudes
         
         # Penalty if electrodes are physically too close (short circuit risk)
         dist_AB = np.linalg.norm(np.array(loc_A) - np.array(loc_B))
@@ -788,15 +829,16 @@ def optimize_fungal_constants(best_stimulus_params: dict,
     logger.info(f"Fixed protocol: V={voltage:.2f}V, duration={duration:.2f}ms, delay={delay:.2f}ms")
     
     # Define search space for fungal computer constants
+    # Narrowed ranges to focus on stable parameter regions
     space = [
-        Real(30.0, 150.0, name='tau_v'),      # Voltage time constant (ms)
-        Real(300.0, 1600.0, name='tau_w'),    # Recovery variable time constant (ms)
-        Real(0.5, 0.8, name='a'),             # FHN parameter a
-        Real(0.7, 1.0, name='b'),             # FHN parameter b
-        Real(0.5, 10.0, name='v_scale'),      # Voltage scaling factor
-        Real(50.0, 300.0, name='R_off'),      # High resistance state (Ohms)
-        Real(2.0, 50.0, name='R_on'),         # Low resistance state (Ohms)
-        Real(0.0001, 0.02, name='alpha')       # Memristor adaptation rate
+        Real(40.0, 100.0, name='tau_v'),      # Voltage time constant (ms) - avoid extremes
+        Real(400.0, 1200.0, name='tau_w'),    # Recovery variable time constant (ms) - reduced upper bound
+        Real(0.6, 0.8, name='a'),             # FHN parameter a - tighter range
+        Real(0.75, 0.95, name='b'),           # FHN parameter b - ensure b > a + 0.1
+        Real(1.0, 8.0, name='v_scale'),       # Voltage scaling factor - avoid extremes
+        Real(80.0, 250.0, name='R_off'),      # High resistance state (Ohms)
+        Real(5.0, 30.0, name='R_on'),         # Low resistance state (Ohms) - avoid very low values
+        Real(0.001, 0.015, name='alpha')      # Memristor adaptation rate - reduced upper bound
     ]
     
     @use_named_args(space)
@@ -821,7 +863,30 @@ def optimize_fungal_constants(best_stimulus_params: dict,
         logger.debug(f"  v_scale={v_scale:.2f}, R_off={R_off:.1f}, R_on={R_on:.1f}, alpha={alpha:.4f}")
         eval_start = time.time()
         
-        # Update the constants
+        # --- SAFETY CONSTRAINT 1: Physics ---
+        # Resistance Logic: Off must be significantly higher than On
+        if R_off < (2.0 * R_on):
+            return 1000.0  # Penalty for low contrast
+
+        # --- SAFETY CONSTRAINT 2: Stability ---
+        # FHN stability heuristic: b must be large enough relative to a
+        if b < (a + 0.1):
+            return 1000.0  # Penalty for oscillatory regime
+        
+        # --- SAFETY CONSTRAINT 3: Time constant ratio ---
+        # tau_w should be significantly larger than tau_v for proper FHN dynamics
+        # Ratio should be at least 5:1, ideally 10:1 or more
+        if tau_w < (5.0 * tau_v):
+            return 1000.0  # Penalty for unstable time constant ratio
+        
+        # --- SAFETY CONSTRAINT 4: Extreme parameter values ---
+        # Reject extreme combinations that are known to cause instability
+        if tau_v < 40.0 and tau_w > 1200.0:
+            return 1000.0  # Very fast voltage with very slow recovery = explosion
+        if alpha > 0.015 and R_on < 5.0:
+            return 1000.0  # High adaptation with low resistance = instability
+        
+        # Update the constants AFTER checking constraints
         env.tau_v = tau_v
         env.tau_w = tau_w
         env.a = a
@@ -830,16 +895,6 @@ def optimize_fungal_constants(best_stimulus_params: dict,
         env.R_off = R_off
         env.R_on = R_on
         env.alpha = alpha
-
-        # --- SAFETY CONSTRAINT 1: Physics ---
-        # Resistance Logic: Off must be significantly higher than On
-        if R_off < (1.5 * R_on):
-            return 100.0  # Penalty for low contrast
-
-        # --- SAFETY CONSTRAINT 2: Stability ---
-        # FHN stability heuristic: b must be large enough relative to a
-        if b < a:
-            return 100.0  # Penalty for oscillatory regime
             
         # Simulate all 4 XOR input cases with fixed stimulus protocol
         logger.debug("Running XOR case (1,0)...")
@@ -867,19 +922,24 @@ def optimize_fungal_constants(best_stimulus_params: dict,
         if not np.all(np.isfinite([v_10, v_01, v_11, v_00])):
             return 1000.0  # Penalty for numerical explosion
 
-        # Check for Voltage Blowup (FHN shouldn't exceed +/- 10.0 internal units)
+        # Check for Voltage Blowup (FHN shouldn't exceed +/- 3.0 internal units)
         # Note: We check the RAW solver output, not the scaled output
-        if (np.max(np.abs(sol_10[:, :env.num_nodes])) > 10.0 
-            or np.max(np.abs(sol_01[:, :env.num_nodes])) > 10.0 
-            or np.max(np.abs(sol_11[:, :env.num_nodes])) > 10.0 
-            or np.max(np.abs(sol_00[:, :env.num_nodes])) > 10.0):
+        # Standard FHN operates in [-2, 2] range, so 3.0 is already generous
+        if (np.max(np.abs(sol_10[:, :env.num_nodes])) > 3.0 
+            or np.max(np.abs(sol_01[:, :env.num_nodes])) > 3.0 
+            or np.max(np.abs(sol_11[:, :env.num_nodes])) > 3.0 
+            or np.max(np.abs(sol_00[:, :env.num_nodes])) > 3.0):
             return 1000.0 # Penalty for non-physical explosion
         
         # XOR Score: maximize separation between high (10, 01) and low (00, 11) outputs
         min_high = min(v_10, v_01)
         max_low = max(v_00, v_11)
         score = min_high - max_low
-        score = min(score, 2.0) # cap at 2V to prevent extreme values that are physically unrealistic
+        
+        # Penalize if any individual voltage magnitude is too large (> 2.0V is unrealistic)
+        max_voltage = max(abs(v_10), abs(v_01), abs(v_11), abs(v_00))
+        if max_voltage > 2.0:
+            return 1000.0  # Penalty for unrealistic voltage magnitudes
         
         # Add penalty for extreme parameter values to encourage realistic physics
         penalty = 0.0
@@ -1001,7 +1061,7 @@ def optimize_xor_gate(num_nodes: int = 30, n_calls: int = 15,
         Real(0.0, env.area_size, name='y_B'),
         Real(0.0, env.area_size, name='x_out'),
         Real(0.0, env.area_size, name='y_out'),
-        Real(0.5, 10.0, name='voltage'),
+        Real(0.5, 4.0, name='voltage'),  # Reduced from 10.0 to 4.0 to prevent instability
         Real(5.0, 5000.0, name='duration'),
         Real(-200.0, 200.0, name='delay')
     ]
@@ -1619,7 +1679,7 @@ if __name__ == "__main__":
     # Run optimization
     # Set tune_physics=True to enable two-level optimization (stimulus + constants)
     tic = time.time()
-    results = optimize_xor_gate(num_nodes=50, n_calls=5, random_state=42, 
+    results = optimize_xor_gate(num_nodes=40, n_calls=200, random_state=42, 
                                minimizer='gp', tune_physics=True)
     
     # If constants were tuned, use the tuned environment for visualization
