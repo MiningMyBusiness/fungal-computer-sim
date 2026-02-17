@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 NODE_COUNTS = [20, 30, 40, 50, 60, 80, 100, 120]
 
 # Number of random parameter sets to test per node count
-TRIALS_PER_NODE_COUNT = 300  # Aiming for 2000+ total simulations
+TRIALS_PER_NODE_COUNT = 50  # Aiming for 2000+ total simulations
 
 # Output directory
 OUTPUT_DIR = Path("characterization_study_results")
@@ -140,51 +140,181 @@ def run_characterization(env: RealisticFungalComputer) -> Dict:
     features = {}
     
     try:
-        # 1. Step Response Protocol
+        # 1. Step Response Protocol - Extract all new features
         logger.debug("Running step response protocol...")
         step_result = env.step_response_protocol(**STEP_RESPONSE_PARAMS)
-        features['step_rise_time'] = step_result['rise_time']
-        features['step_saturation_voltage'] = step_result['saturation_voltage']
-        features['step_oscillation_index'] = step_result['oscillation_index']
         
-        # 2. Paired-Pulse Protocol
+        # Step response features (13 features)
+        features['step_baseline'] = step_result['baseline']
+        features['step_peak_amplitude'] = step_result['peak_amplitude']
+        features['step_time_to_peak'] = step_result['time_to_peak']
+        features['step_peak_to_baseline_ratio'] = step_result['peak_to_baseline_ratio']
+        features['step_half_decay_time'] = step_result['half_decay_time']
+        features['step_decay_rate'] = step_result['decay_rate']
+        features['step_area_under_curve'] = step_result['area_under_curve']
+        features['step_response_duration'] = step_result['response_duration']
+        features['step_activation_speed'] = step_result['activation_speed']
+        features['step_latency'] = step_result['latency']
+        features['step_initial_slope'] = step_result['initial_slope']
+        features['step_settling_deviation'] = step_result['settling_deviation']
+        features['step_asymmetry_index'] = step_result['asymmetry_index']
+        
+        # 2. Paired-Pulse Protocol - Extract all new features
         logger.debug("Running paired-pulse protocol...")
         pp_result = env.paired_pulse_protocol(**PAIRED_PULSE_PARAMS)
-        # Store recovery ratios for each delay
-        for i, delay in enumerate(pp_result['delays']):
-            features[f'pp_recovery_ratio_delay_{int(delay)}'] = pp_result['recovery_ratios'][i]
-            features[f'pp_first_peak_delay_{int(delay)}'] = pp_result['first_peak_heights'][i]
-            features[f'pp_second_peak_delay_{int(delay)}'] = pp_result['second_peak_heights'][i]
         
-        # 3. Triangle Sweep Protocol
+        # Store features for each delay (18 features per delay)
+        for result in pp_result['results']:
+            delay = int(result['delay'])
+            prefix = f'pp_delay_{delay}'
+            
+            # Individual pulse metrics
+            features[f'{prefix}_peak1_amplitude'] = result['peak1_amplitude']
+            features[f'{prefix}_peak2_amplitude'] = result['peak2_amplitude']
+            features[f'{prefix}_time_to_peak1'] = result['time_to_peak1']
+            features[f'{prefix}_time_to_peak2'] = result['time_to_peak2']
+            features[f'{prefix}_auc1'] = result['auc1']
+            features[f'{prefix}_auc2'] = result['auc2']
+            features[f'{prefix}_peak_width1'] = result['peak_width1']
+            features[f'{prefix}_peak_width2'] = result['peak_width2']
+            
+            # Recovery/facilitation metrics
+            features[f'{prefix}_peak_ratio'] = result['peak_ratio']
+            features[f'{prefix}_auc_ratio'] = result['auc_ratio']
+            features[f'{prefix}_latency_change'] = result['latency_change']
+            features[f'{prefix}_width_ratio'] = result['width_ratio']
+            
+            # Inter-pulse dynamics
+            features[f'{prefix}_baseline_shift'] = result['baseline_shift']
+            features[f'{prefix}_recovery_fraction'] = result['recovery_fraction']
+            features[f'{prefix}_effective_ipi'] = result['effective_ipi']
+            
+            # Shape and aggregate metrics
+            features[f'{prefix}_waveform_correlation'] = result['waveform_correlation']
+            features[f'{prefix}_total_response'] = result['total_response']
+            features[f'{prefix}_facilitation_index'] = result['facilitation_index']
+        
+        # Aggregate paired-pulse features across delays
+        if len(pp_result['results']) > 0:
+            peak_ratios = [r['peak_ratio'] for r in pp_result['results']]
+            facilitation_indices = [r['facilitation_index'] for r in pp_result['results']]
+            
+            features['pp_avg_peak_ratio'] = np.mean(peak_ratios)
+            features['pp_std_peak_ratio'] = np.std(peak_ratios)
+            features['pp_avg_facilitation_index'] = np.mean(facilitation_indices)
+            
+            # Recovery slope (change in peak ratio with delay)
+            if len(peak_ratios) >= 2:
+                delays = [r['delay'] for r in pp_result['results']]
+                features['pp_recovery_slope'] = (peak_ratios[-1] - peak_ratios[0]) / (delays[-1] - delays[0])
+            else:
+                features['pp_recovery_slope'] = 0.0
+        else:
+            features['pp_avg_peak_ratio'] = np.nan
+            features['pp_std_peak_ratio'] = np.nan
+            features['pp_avg_facilitation_index'] = np.nan
+            features['pp_recovery_slope'] = np.nan
+        
+        # 3. Triangle Sweep Protocol - Extract all new features
         logger.debug("Running triangle sweep protocol...")
         tri_result = env.triangle_sweep_protocol(**TRIANGLE_SWEEP_PARAMS)
-        features['tri_hysteresis_area'] = tri_result['hysteresis_area']
         
-        # Calculate additional derived features
-        # Average recovery ratio across delays
-        features['pp_avg_recovery_ratio'] = np.mean(pp_result['recovery_ratios'])
-        features['pp_std_recovery_ratio'] = np.std(pp_result['recovery_ratios'])
+        # Hysteresis metrics (4 features)
+        features['tri_total_hysteresis_area'] = tri_result['total_hysteresis_area']
+        features['tri_pos_hysteresis'] = tri_result['pos_hysteresis']
+        features['tri_neg_hysteresis'] = tri_result['neg_hysteresis']
+        features['tri_max_hysteresis_width'] = tri_result['max_hysteresis_width']
         
-        # Peak ratio change (how much recovery improves with longer delays)
-        if len(pp_result['recovery_ratios']) >= 2:
-            features['pp_recovery_slope'] = (pp_result['recovery_ratios'][-1] - 
-                                            pp_result['recovery_ratios'][0]) / (pp_result['delays'][-1] - pp_result['delays'][0])
-        else:
-            features['pp_recovery_slope'] = 0.0
+        # Asymmetry metrics (4 features)
+        features['tri_response_at_pos_max'] = tri_result['response_at_pos_max']
+        features['tri_response_at_neg_max'] = tri_result['response_at_neg_max']
+        features['tri_pos_neg_ratio'] = tri_result['pos_neg_ratio']
+        features['tri_rectification_index'] = tri_result['rectification_index']
+        
+        # Nonlinearity metrics (3 features)
+        features['tri_linearity_deviation'] = tri_result['linearity_deviation']
+        features['tri_slope_variation'] = tri_result['slope_variation']
+        features['tri_num_inflection_points'] = tri_result['num_inflection_points']
+        
+        # Dynamic range (2 features)
+        features['tri_response_amplitude'] = tri_result['response_amplitude']
+        features['tri_voltage_gain'] = tri_result['voltage_gain']
+        
+        # Phase-specific features (3 features)
+        features['tri_phase1_gain'] = tri_result['phase1_gain']
+        features['tri_phase2_gain'] = tri_result['phase2_gain']
+        features['tri_phase3_gain'] = tri_result['phase3_gain']
+        
+        # Memory effects (2 features)
+        features['tri_return_point_deviation'] = tri_result['return_point_deviation']
+        features['tri_loop_closure_error'] = tri_result['loop_closure_error']
+        
+        # Shape descriptors (3 features)
+        features['tri_loop_eccentricity'] = tri_result['loop_eccentricity']
+        features['tri_centroid_v_applied'] = tri_result['centroid_v_applied']
+        features['tri_centroid_v_response'] = tri_result['centroid_v_response']
+        
+        # Frequency content (2 features)
+        features['tri_smoothness_index'] = tri_result['smoothness_index']
+        features['tri_oscillation_count'] = tri_result['oscillation_count']
         
         features['characterization_success'] = True
         features['error_message'] = None
         
     except Exception as e:
         logger.error(f"Characterization failed: {str(e)}")
-        # Fill with NaN on failure
-        for key in ['step_rise_time', 'step_saturation_voltage', 'step_oscillation_index',
-                    'pp_recovery_ratio_delay_200', 'pp_recovery_ratio_delay_800', 'pp_recovery_ratio_delay_2000',
-                    'pp_first_peak_delay_200', 'pp_first_peak_delay_800', 'pp_first_peak_delay_2000',
-                    'pp_second_peak_delay_200', 'pp_second_peak_delay_800', 'pp_second_peak_delay_2000',
-                    'tri_hysteresis_area', 'pp_avg_recovery_ratio', 'pp_std_recovery_ratio', 'pp_recovery_slope']:
+        import traceback
+        logger.error(traceback.format_exc())
+        
+        # Fill with NaN on failure - create a comprehensive list of all feature keys
+        feature_keys = []
+        
+        # Step response features
+        step_features = ['step_baseline', 'step_peak_amplitude', 'step_time_to_peak', 
+                        'step_peak_to_baseline_ratio', 'step_half_decay_time', 'step_decay_rate',
+                        'step_area_under_curve', 'step_response_duration', 'step_activation_speed',
+                        'step_latency', 'step_initial_slope', 'step_settling_deviation', 
+                        'step_asymmetry_index']
+        feature_keys.extend(step_features)
+        
+        # Paired-pulse features (for each delay)
+        for delay in PAIRED_PULSE_PARAMS['delays']:
+            delay_int = int(delay)
+            prefix = f'pp_delay_{delay_int}'
+            pp_features = [
+                f'{prefix}_peak1_amplitude', f'{prefix}_peak2_amplitude',
+                f'{prefix}_time_to_peak1', f'{prefix}_time_to_peak2',
+                f'{prefix}_auc1', f'{prefix}_auc2',
+                f'{prefix}_peak_width1', f'{prefix}_peak_width2',
+                f'{prefix}_peak_ratio', f'{prefix}_auc_ratio',
+                f'{prefix}_latency_change', f'{prefix}_width_ratio',
+                f'{prefix}_baseline_shift', f'{prefix}_recovery_fraction',
+                f'{prefix}_effective_ipi', f'{prefix}_waveform_correlation',
+                f'{prefix}_total_response', f'{prefix}_facilitation_index'
+            ]
+            feature_keys.extend(pp_features)
+        
+        # Aggregate paired-pulse features
+        feature_keys.extend(['pp_avg_peak_ratio', 'pp_std_peak_ratio', 
+                           'pp_avg_facilitation_index', 'pp_recovery_slope'])
+        
+        # Triangle sweep features
+        tri_features = [
+            'tri_total_hysteresis_area', 'tri_pos_hysteresis', 'tri_neg_hysteresis',
+            'tri_max_hysteresis_width', 'tri_response_at_pos_max', 'tri_response_at_neg_max',
+            'tri_pos_neg_ratio', 'tri_rectification_index', 'tri_linearity_deviation',
+            'tri_slope_variation', 'tri_num_inflection_points', 'tri_response_amplitude',
+            'tri_voltage_gain', 'tri_phase1_gain', 'tri_phase2_gain', 'tri_phase3_gain',
+            'tri_return_point_deviation', 'tri_loop_closure_error', 'tri_loop_eccentricity',
+            'tri_centroid_v_applied', 'tri_centroid_v_response', 'tri_smoothness_index',
+            'tri_oscillation_count'
+        ]
+        feature_keys.extend(tri_features)
+        
+        # Set all to NaN
+        for key in feature_keys:
             features[key] = np.nan
+            
         features['characterization_success'] = False
         features['error_message'] = str(e)
     
@@ -393,9 +523,9 @@ def run_systematic_characterization(resume: bool = False):
                 
                 if features['characterization_success']:
                     logger.info(f"Trial completed successfully in {trial_duration:.1f}s")
-                    logger.info(f"Features: rise_time={features['step_rise_time']:.1f}ms, "
-                              f"saturation={features['step_saturation_voltage']:.3f}V, "
-                              f"hysteresis={features['tri_hysteresis_area']:.4f}")
+                    logger.info(f"Features: time_to_peak={features['step_time_to_peak']:.1f}ms, "
+                              f"peak_amplitude={features['step_peak_amplitude']:.3f}V, "
+                              f"hysteresis={features['tri_total_hysteresis_area']:.4f}")
                 else:
                     logger.warning(f"Trial completed with errors in {trial_duration:.1f}s")
                 
@@ -457,11 +587,11 @@ def run_systematic_characterization(resume: bool = False):
         
         logger.info("")
         logger.info("RESPONSE FEATURE STATISTICS:")
-        logger.info(f"  Step rise time: {successful_trials['step_rise_time'].mean():.1f} ± {successful_trials['step_rise_time'].std():.1f} ms")
-        logger.info(f"  Step saturation: {successful_trials['step_saturation_voltage'].mean():.3f} ± {successful_trials['step_saturation_voltage'].std():.3f} V")
-        logger.info(f"  Oscillation index: {successful_trials['step_oscillation_index'].mean():.4f} ± {successful_trials['step_oscillation_index'].std():.4f}")
-        logger.info(f"  Avg recovery ratio: {successful_trials['pp_avg_recovery_ratio'].mean():.3f} ± {successful_trials['pp_avg_recovery_ratio'].std():.3f}")
-        logger.info(f"  Hysteresis area: {successful_trials['tri_hysteresis_area'].mean():.4f} ± {successful_trials['tri_hysteresis_area'].std():.4f}")
+        logger.info(f"  Step time to peak: {successful_trials['step_time_to_peak'].mean():.1f} ± {successful_trials['step_time_to_peak'].std():.1f} ms")
+        logger.info(f"  Step peak amplitude: {successful_trials['step_peak_amplitude'].mean():.3f} ± {successful_trials['step_peak_amplitude'].std():.3f} V")
+        logger.info(f"  Step activation speed: {successful_trials['step_activation_speed'].mean():.1f} ± {successful_trials['step_activation_speed'].std():.1f} ms")
+        logger.info(f"  Avg peak ratio: {successful_trials['pp_avg_peak_ratio'].mean():.3f} ± {successful_trials['pp_avg_peak_ratio'].std():.3f}")
+        logger.info(f"  Total hysteresis area: {successful_trials['tri_total_hysteresis_area'].mean():.4f} ± {successful_trials['tri_total_hysteresis_area'].std():.4f}")
     
     logger.info("="*70)
     

@@ -1,0 +1,38 @@
+{
+  "timestamp": "20260114_093330",
+  "data_file": "characterization_study_results/characterization_results_20260105_145157.csv",
+  "n_samples_train": 1901,
+  "n_samples_test": 476,
+  "features": [
+    "step_rise_time",
+    "step_saturation_voltage",
+    "step_oscillation_index",
+    "pp_recovery_ratio_delay_200",
+    "pp_recovery_ratio_delay_800",
+    "pp_recovery_ratio_delay_2000",
+    "pp_first_peak_delay_200",
+    "pp_first_peak_delay_800",
+    "pp_first_peak_delay_2000",
+    "pp_second_peak_delay_200",
+    "pp_second_peak_delay_800",
+    "pp_second_peak_delay_2000",
+    "pp_avg_recovery_ratio",
+    "pp_std_recovery_ratio",
+    "pp_recovery_slope",
+    "tri_hysteresis_area"
+  ],
+  "targets": [
+    "tau_v",
+    "tau_w",
+    "a",
+    "b",
+    "v_scale",
+    "R_off",
+    "R_on",
+    "alpha",
+    "num_nodes",
+    "num_edges",
+    "network_density"
+  ],
+  "test_size": 0.2
+}

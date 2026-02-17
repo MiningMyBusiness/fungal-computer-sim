@@ -1,0 +1,51 @@
+{
+  "timestamp": "20260115_145215",
+  "specimen": {
+    "num_nodes": 60,
+    "num_edges": 258,
+    "random_seed": null
+  },
+  "true_parameters": {
+    "tau_v": 99.80431725277101,
+    "tau_w": 877.6772433040949,
+    "a": 0.5465083195690431,
+    "b": 0.9127218040623565,
+    "v_scale": 7.718968515951532,
+    "R_off": 151.76683155721594,
+    "R_on": 17.092248487656388,
+    "alpha": 0.00040887175799557093
+  },
+  "predicted_parameters": {
+    "tau_v": 103.94755468678319,
+    "tau_w": 825.4873070150729,
+    "a": 0.5860407710521267,
+    "b": 0.8249320436677183,
+    "v_scale": 4.992297920640938,
+    "R_off": 164.82814915996332,
+    "R_on": 25.272258160693326,
+    "alpha": 0.0024779439955599923
+  },
+  "refined_parameters": {
+    "tau_v": 103.55595185465076,
+    "tau_w": 825.3824296065242,
+    "a": 0.5865462484155393,
+    "b": 0.8439686888522508,
+    "v_scale": 4.992297920640938,
+    "R_off": 164.58853172569806,
+    "R_on": 25.16729874600646,
+    "alpha": 0.0001
+  },
+  "model_type": "random_forest",
+  "optimization": {
+    "method": "L-BFGS-B",
+    "success": true,
+    "final_mismatch": 0.005596590792511621,
+    "n_evaluations": 585,
+    "message": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH"
+  },
+  "mismatch": {
+    "initial": 0.02196405768078569,
+    "final": 0.005596590792511621,
+    "improvement_percent": 74.51932209498995
+  }
+}

@@ -372,14 +372,13 @@ class RealisticFungalComputer:
         return t, solution[:, :n]
 
     def step_response_protocol(self, voltage: float = 2.0, pulse_duration: float = 3000.0,
-                              probe_distance: float = 4.0, sim_time: float = 5000.0) -> Dict:
+                              probe_distance: float = 5.0, sim_time: float = 5000.0) -> Dict:
         """Run a step response protocol for system identification.
         
         A single, long DC pulse is applied at the center, and the response is measured
-        at a probe electrode at a fixed distance. This characterizes:
-        - Rise time to saturation
-        - Saturation voltage
-        - Presence of oscillations before settling
+        at a probe electrode at a fixed distance. This characterizes transient dynamics
+        including peak response, decay kinetics, and shape descriptors suitable for
+        non-saturating responses.
         
         Args:
             voltage: Stimulation voltage (V)
@@ -391,9 +390,19 @@ class RealisticFungalComputer:
             Dictionary containing:
                 - 'time': Time array
                 - 'response': Voltage response at probe
-                - 'rise_time': Time to reach 90% of saturation (ms)
-                - 'saturation_voltage': Final steady-state voltage (V)
-                - 'oscillation_index': Measure of oscillatory behavior (0=none, >0=oscillatory)
+                - 'baseline': Baseline voltage before stimulus
+                - 'peak_amplitude': Maximum response amplitude (V)
+                - 'time_to_peak': Time from stimulus to peak (ms)
+                - 'peak_to_baseline_ratio': Normalized peak height
+                - 'half_decay_time': Time for response to decay to 50% of peak (ms)
+                - 'decay_rate': Initial decay slope (V/ms)
+                - 'area_under_curve': Integrated response magnitude
+                - 'response_duration': Time above 10% of peak (ms)
+                - 'activation_speed': Time from 10% to 90% of peak (ms)
+                - 'latency': Delay to 10% of peak (ms)
+                - 'initial_slope': Initial rise slope (V/ms)
+                - 'settling_deviation': Std deviation in late response phase
+                - 'asymmetry_index': Ratio of rise to decay duration
                 - 'center_pos': Center electrode position
                 - 'probe_pos': Probe electrode position
         """
@@ -416,40 +425,105 @@ class RealisticFungalComputer:
         t, sol = self.run_experiment_custom_stim(sim_time, stim)
         v_out = np.array([self.read_output_voltage(probe, sol[i, :]) for i in range(len(sol))])
         
-        # Extract features
-        # 1. Saturation voltage (average of last 20% of response)
-        saturation_start_idx = int(0.8 * len(v_out))
-        saturation_voltage = np.mean(v_out[saturation_start_idx:])
+        # Extract features for non-saturating step responses
+        baseline_idx = np.where(t < pulse_start)[0]
+        baseline = np.mean(v_out[baseline_idx]) if len(baseline_idx) > 0 else v_out[0]
+        response_idx = np.where(t >= pulse_start)[0]
+        response_signal = v_out[response_idx] - baseline
+        response_time = t[response_idx] - pulse_start
         
-        # 2. Rise time (time to reach 90% of saturation)
-        target_voltage = 0.9 * saturation_voltage
-        rise_idx = np.where(v_out >= target_voltage)[0]
-        if len(rise_idx) > 0:
-            rise_time = t[rise_idx[0]] - pulse_start
-        else:
-            rise_time = np.inf  # Never reached 90%
+        # 1. Peak Response Metrics
+        peak_idx = np.argmax(np.abs(response_signal))
+        peak_amplitude = response_signal[peak_idx]
+        time_to_peak = response_time[peak_idx]
+        peak_to_baseline_ratio = np.abs(peak_amplitude) / (np.abs(baseline) + 1e-6)
         
-        # 3. Oscillation index (normalized standard deviation during settling)
-        # Look at the period from 50% rise to 95% of simulation
-        if len(rise_idx) > 0:
-            settling_start = rise_idx[0]
-            settling_end = int(0.95 * len(v_out))
-            settling_region = v_out[settling_start:settling_end]
-            if len(settling_region) > 0:
-                oscillation_index = np.std(settling_region) / (np.abs(saturation_voltage) + 1e-6)
+        # 2. Decay Dynamics (from peak onwards)
+        if peak_idx < len(response_signal) - 1:
+            decay_signal = response_signal[peak_idx:]
+            decay_time = response_time[peak_idx:]
+            
+            # Half-decay time
+            half_peak = peak_amplitude * 0.5
+            half_decay_idx = np.where(np.abs(decay_signal - half_peak) == np.min(np.abs(decay_signal - half_peak)))[0]
+            half_decay_time = decay_time[half_decay_idx[0]] if len(half_decay_idx) > 0 else np.inf
+            
+            # Initial decay rate (slope in first 10% of decay period)
+            decay_window = max(1, int(0.1 * len(decay_signal)))
+            if decay_window > 1:
+                decay_rate = (decay_signal[decay_window] - decay_signal[0]) / (decay_time[decay_window] - decay_time[0])
             else:
-                oscillation_index = 0.0
+                decay_rate = 0.0
         else:
-            oscillation_index = 0.0
+            half_decay_time = 0.0
+            decay_rate = 0.0
         
-        logger.info(f"Step response: rise_time={rise_time:.1f}ms, saturation={saturation_voltage:.3f}V, oscillation={oscillation_index:.4f}")
+        # 3. Integrated Response
+        dt = np.mean(np.diff(t))
+        try:
+            area_under_curve = np.trapezoid(np.abs(response_signal), dx=dt)
+        except AttributeError:
+            area_under_curve = np.trapz(np.abs(response_signal), dx=dt)
+        
+        # Response duration (time above 10% of peak)
+        threshold = 0.1 * np.abs(peak_amplitude)
+        above_threshold = np.abs(response_signal) > threshold
+        response_duration = np.sum(above_threshold) * dt if np.any(above_threshold) else 0.0
+        
+        # 4. Shape Descriptors
+        # Activation speed (10% to 90% of peak)
+        peak_10 = 0.1 * peak_amplitude
+        peak_90 = 0.9 * peak_amplitude
+        if peak_amplitude > 0:
+            idx_10 = np.where(response_signal >= peak_10)[0]
+            idx_90 = np.where(response_signal >= peak_90)[0]
+        else:
+            idx_10 = np.where(response_signal <= peak_10)[0]
+            idx_90 = np.where(response_signal <= peak_90)[0]
+        
+        if len(idx_10) > 0 and len(idx_90) > 0:
+            activation_speed = response_time[idx_90[0]] - response_time[idx_10[0]]
+        else:
+            activation_speed = np.inf
+        
+        # Latency (time to 10% of peak)
+        latency = response_time[idx_10[0]] if len(idx_10) > 0 else np.inf
+        
+        # Initial slope (dV/dt in first 10-20% of rise)
+        rise_window = max(1, int(0.15 * peak_idx))
+        if rise_window > 1 and peak_idx > rise_window:
+            initial_slope = (response_signal[rise_window] - response_signal[0]) / (response_time[rise_window] - response_time[0])
+        else:
+            initial_slope = 0.0
+        
+        # Settling deviation (std in late phase, last 30% of response)
+        late_start_idx = int(0.7 * len(response_signal))
+        settling_deviation = np.std(response_signal[late_start_idx:]) if late_start_idx < len(response_signal) else 0.0
+        
+        # Asymmetry index (rise vs decay)
+        decay_duration = response_time[-1] - time_to_peak
+        asymmetry_index = time_to_peak / (decay_duration + 1e-6) if decay_duration > 0 else 0.0
+        
+        logger.info(f"Step response: peak={peak_amplitude:.3f}V at t={time_to_peak:.1f}ms, "
+                   f"activation={activation_speed:.1f}ms, AUC={area_under_curve:.2f}, "
+                   f"half_decay={half_decay_time:.1f}ms")
         
         return {
             'time': t,
             'response': v_out,
-            'rise_time': rise_time,
-            'saturation_voltage': saturation_voltage,
-            'oscillation_index': oscillation_index,
+            'baseline': baseline,
+            'peak_amplitude': peak_amplitude,
+            'time_to_peak': time_to_peak,
+            'peak_to_baseline_ratio': peak_to_baseline_ratio,
+            'half_decay_time': half_decay_time,
+            'decay_rate': decay_rate,
+            'area_under_curve': area_under_curve,
+            'response_duration': response_duration,
+            'activation_speed': activation_speed,
+            'latency': latency,
+            'initial_slope': initial_slope,
+            'settling_deviation': settling_deviation,
+            'asymmetry_index': asymmetry_index,
             'center_pos': center,
             'probe_pos': probe
         }
@@ -457,11 +531,11 @@ class RealisticFungalComputer:
     def paired_pulse_protocol(self, voltage: float = 2.0, pulse_width: float = 50.0,
                              probe_distance: float = 4.0, 
                              delays: Optional[List[float]] = None) -> Dict:
-        """Run a paired-pulse protocol to characterize refractory period.
+        """Run a paired-pulse protocol to characterize recovery and facilitation dynamics.
         
         Two short pulses separated by variable delay are applied at the center.
-        The ratio of the second pulse response to the first pulse response
-        indicates the recovery dynamics of the system.
+        Each pulse is analyzed in its own temporal window with proper baseline correction
+        to capture recovery, facilitation, and inter-pulse interference effects.
         
         Args:
             voltage: Stimulation voltage (V)
@@ -473,9 +547,26 @@ class RealisticFungalComputer:
         Returns:
             Dictionary containing:
                 - 'delays': Array of tested inter-pulse intervals
-                - 'recovery_ratios': Ratio of 2nd peak / 1st peak for each delay
-                - 'first_peak_heights': Height of first peak for each delay
-                - 'second_peak_heights': Height of second peak for each delay
+                - 'results': List of dictionaries (one per delay) with features:
+                    * 'delay': Inter-pulse interval (ms)
+                    * 'peak1_amplitude': First pulse peak amplitude (V)
+                    * 'peak2_amplitude': Second pulse peak amplitude (V)
+                    * 'time_to_peak1': Time to first peak (ms)
+                    * 'time_to_peak2': Time to second peak (ms)
+                    * 'auc1': Area under curve for first pulse
+                    * 'auc2': Area under curve for second pulse
+                    * 'peak_width1': Width at half-maximum for first pulse (ms)
+                    * 'peak_width2': Width at half-maximum for second pulse (ms)
+                    * 'peak_ratio': P2/P1 amplitude ratio
+                    * 'auc_ratio': AUC2/AUC1 ratio
+                    * 'latency_change': Difference in time-to-peak (ms)
+                    * 'width_ratio': Peak width ratio
+                    * 'baseline_shift': Voltage shift between pulses (V)
+                    * 'recovery_fraction': Fractional recovery before P2
+                    * 'effective_ipi': Actual time between peak responses (ms)
+                    * 'waveform_correlation': Shape similarity between pulses
+                    * 'total_response': Combined response magnitude
+                    * 'facilitation_index': >0 for facilitation, <0 for depression
                 - 'center_pos': Center electrode position
                 - 'probe_pos': Probe electrode position
         """
@@ -488,15 +579,15 @@ class RealisticFungalComputer:
         center = (self.area_size / 2, self.area_size / 2)
         probe = (self.area_size / 2 + probe_distance, self.area_size / 2)
         
-        recovery_ratios = []
-        first_peaks = []
-        second_peaks = []
+        # Storage for features across all delays
+        all_results = []
         
         for dt in delays:
             logger.debug(f"Testing inter-pulse interval: {dt}ms")
             
             # Define paired-pulse stimulation
             pulse_start = 100.0  # ms
+            pulse2_start = pulse_start + pulse_width + dt
             coupling_map = self.calculate_stimulation_coupling(center, voltage)
             
             def stim(t: float) -> np.ndarray:
@@ -504,49 +595,149 @@ class RealisticFungalComputer:
                 if pulse_start < t < (pulse_start + pulse_width):
                     return coupling_map
                 # Second pulse (after delay)
-                if (pulse_start + pulse_width + dt) < t < (pulse_start + 2 * pulse_width + dt):
+                if pulse2_start < t < (pulse2_start + pulse_width):
                     return coupling_map
                 return np.zeros(self.num_nodes)
             
             # Run experiment (need enough time for both pulses)
-            sim_time = pulse_start + 2 * pulse_width + dt + 1000.0
+            sim_time = pulse2_start + pulse_width + 1000.0
             t, sol = self.run_experiment_custom_stim(sim_time, stim)
             v_out = np.array([self.read_output_voltage(probe, sol[i, :]) for i in range(len(sol))])
             
-            # Find peaks in the response
-            # Use a minimum height threshold and minimum distance between peaks
-            peaks, properties = find_peaks(v_out, height=0.1, distance=int(20.0 / DEFAULT_TIME_STEP))
+            # Get baseline before first pulse
+            baseline_idx = np.where(t < pulse_start)[0]
+            baseline = np.mean(v_out[baseline_idx]) if len(baseline_idx) > 0 else v_out[0]
             
-            if len(peaks) >= 2:
-                # Take the two highest peaks
-                peak_heights = v_out[peaks]
-                sorted_indices = np.argsort(peak_heights)[-2:]  # Get indices of 2 highest peaks
-                sorted_peaks = peaks[sorted_indices]
-                sorted_peaks = sorted_peaks[np.argsort(sorted_peaks)]  # Sort by time
-                
-                first_peak_height = v_out[sorted_peaks[0]]
-                second_peak_height = v_out[sorted_peaks[1]]
-                
-                ratio = second_peak_height / (first_peak_height + 1e-9)  # Avoid division by zero
-                recovery_ratios.append(ratio)
-                first_peaks.append(first_peak_height)
-                second_peaks.append(second_peak_height)
-                
-                logger.debug(f"Delay {dt}ms: 1st peak={first_peak_height:.3f}V, 2nd peak={second_peak_height:.3f}V, ratio={ratio:.3f}")
+            # Define analysis windows for each pulse
+            # Window: from pulse start to next pulse start (or end of recording)
+            window1_start = pulse_start
+            window1_end = pulse2_start
+            window2_start = pulse2_start
+            window2_end = min(pulse2_start + dt + pulse_width + 500.0, t[-1])
+            
+            # Extract signals for each pulse window
+            idx1 = np.where((t >= window1_start) & (t < window1_end))[0]
+            idx2 = np.where((t >= window2_start) & (t < window2_end))[0]
+            
+            if len(idx1) == 0 or len(idx2) == 0:
+                logger.warning(f"Insufficient data for delay {dt}ms")
+                continue
+            
+            t1 = t[idx1] - window1_start
+            v1 = v_out[idx1]
+            t2 = t[idx2] - window2_start
+            v2 = v_out[idx2]
+            
+            # Baseline for second pulse (voltage just before second pulse)
+            baseline2_idx = max(0, idx2[0] - 5)
+            baseline2 = np.mean(v_out[max(0, baseline2_idx-5):baseline2_idx+1])
+            
+            # === PULSE 1 ANALYSIS ===
+            v1_corrected = v1 - baseline
+            peak1_idx = np.argmax(np.abs(v1_corrected))
+            peak1_amp = v1_corrected[peak1_idx]
+            time_to_peak1 = t1[peak1_idx]
+            
+            # AUC for pulse 1
+            try:
+                auc1 = np.trapezoid(np.abs(v1_corrected), t1)
+            except AttributeError:
+                auc1 = np.trapz(np.abs(v1_corrected), t1)
+            
+            # Peak width at half maximum for pulse 1
+            half_max1 = peak1_amp * 0.5
+            above_half1 = np.abs(v1_corrected) >= np.abs(half_max1)
+            peak_width1 = np.sum(above_half1) * np.mean(np.diff(t1)) if np.any(above_half1) else 0.0
+            
+            # === PULSE 2 ANALYSIS ===
+            v2_corrected = v2 - baseline2
+            peak2_idx = np.argmax(np.abs(v2_corrected))
+            peak2_amp = v2_corrected[peak2_idx]
+            time_to_peak2 = t2[peak2_idx]
+            
+            # AUC for pulse 2
+            try:
+                auc2 = np.trapezoid(np.abs(v2_corrected), t2)
+            except AttributeError:
+                auc2 = np.trapz(np.abs(v2_corrected), t2)
+            
+            # Peak width at half maximum for pulse 2
+            half_max2 = peak2_amp * 0.5
+            above_half2 = np.abs(v2_corrected) >= np.abs(half_max2)
+            peak_width2 = np.sum(above_half2) * np.mean(np.diff(t2)) if np.any(above_half2) else 0.0
+            
+            # === RECOVERY/FACILITATION METRICS ===
+            peak_ratio = peak2_amp / (peak1_amp + 1e-9)
+            auc_ratio = auc2 / (auc1 + 1e-9)
+            latency_change = time_to_peak2 - time_to_peak1
+            width_ratio = peak_width2 / (peak_width1 + 1e-9)
+            
+            # === INTER-PULSE DYNAMICS ===
+            baseline_shift = baseline2 - baseline
+            
+            # Incomplete recovery: how much signal decayed before pulse 2
+            # Compare voltage just before pulse 2 to peak of pulse 1
+            recovery_fraction = (baseline2 - baseline) / (peak1_amp + 1e-9)
+            
+            # === TEMPORAL FEATURES ===
+            effective_ipi = (window2_start + time_to_peak2) - (window1_start + time_to_peak1)
+            
+            # === SHAPE SIMILARITY ===
+            # Normalize and compare waveform shapes (use first N points where both exist)
+            n_compare = min(len(v1_corrected), len(v2_corrected), 100)
+            if n_compare > 10:
+                v1_norm = v1_corrected[:n_compare] / (np.abs(peak1_amp) + 1e-9)
+                v2_norm = v2_corrected[:n_compare] / (np.abs(peak2_amp) + 1e-9)
+                waveform_correlation = np.corrcoef(v1_norm, v2_norm)[0, 1]
             else:
-                # Second pulse didn't fire (refractory!)
-                recovery_ratios.append(0.0)
-                first_peaks.append(v_out[peaks[0]] if len(peaks) > 0 else 0.0)
-                second_peaks.append(0.0)
-                logger.debug(f"Delay {dt}ms: Only {len(peaks)} peak(s) detected - refractory period!")
+                waveform_correlation = 0.0
+            
+            # === AGGREGATE METRICS ===
+            total_response = auc1 + auc2
+            facilitation_index = peak_ratio - 1.0  # >0 for facilitation, <0 for depression
+            
+            result = {
+                'delay': dt,
+                'peak1_amplitude': peak1_amp,
+                'peak2_amplitude': peak2_amp,
+                'time_to_peak1': time_to_peak1,
+                'time_to_peak2': time_to_peak2,
+                'auc1': auc1,
+                'auc2': auc2,
+                'peak_width1': peak_width1,
+                'peak_width2': peak_width2,
+                'peak_ratio': peak_ratio,
+                'auc_ratio': auc_ratio,
+                'latency_change': latency_change,
+                'width_ratio': width_ratio,
+                'baseline_shift': baseline_shift,
+                'recovery_fraction': recovery_fraction,
+                'effective_ipi': effective_ipi,
+                'waveform_correlation': waveform_correlation,
+                'total_response': total_response,
+                'facilitation_index': facilitation_index
+            }
+            
+            all_results.append(result)
+            
+            logger.debug(f"Delay {dt}ms: P1={peak1_amp:.3f}V, P2={peak2_amp:.3f}V, "
+                        f"ratio={peak_ratio:.3f}, facilitation={facilitation_index:.3f}")
         
-        logger.info(f"Paired-pulse complete: recovery_ratios={recovery_ratios}")
+        # Aggregate results across delays
+        if len(all_results) == 0:
+            logger.warning("No valid paired-pulse results obtained")
+            return {
+                'delays': np.array(delays),
+                'results': [],
+                'center_pos': center,
+                'probe_pos': probe
+            }
+        
+        logger.info(f"Paired-pulse complete: {len(all_results)} delays analyzed")
         
         return {
             'delays': np.array(delays),
-            'recovery_ratios': np.array(recovery_ratios),
-            'first_peak_heights': np.array(first_peaks),
-            'second_peak_heights': np.array(second_peaks),
+            'results': all_results,
             'center_pos': center,
             'probe_pos': probe
         }
@@ -555,9 +746,9 @@ class RealisticFungalComputer:
                                probe_distance: float = 4.0) -> Dict:
         """Run a triangle sweep (cyclic voltammetry) protocol.
         
-        Slowly ramp voltage from 0 to +v_max, then down to -v_max, measuring
-        the current-voltage relationship. The area within the V-I curve indicates
-        plasticity: a fat loop means high plasticity, a thin line means static resistor.
+        Slowly ramp voltage from 0 to +v_max, then down to -v_max, then back to 0,
+        measuring the voltage response to characterize hysteresis, nonlinearity,
+        asymmetry, and memory effects in the V-V curve.
         
         Args:
             v_max: Maximum voltage magnitude (V)
@@ -569,7 +760,38 @@ class RealisticFungalComputer:
                 - 'time': Time array
                 - 'voltage_applied': Applied voltage at each time point
                 - 'current_response': Current response at probe
-                - 'hysteresis_area': Area enclosed by the V-I curve (measure of plasticity)
+                - 'voltage_response': Voltage response at probe
+                - Hysteresis metrics:
+                    * 'total_hysteresis_area': Total area enclosed by V-V curve
+                    * 'pos_hysteresis': Hysteresis in positive voltage region
+                    * 'neg_hysteresis': Hysteresis in negative voltage region
+                    * 'max_hysteresis_width': Maximum voltage separation at any applied voltage
+                - Asymmetry metrics:
+                    * 'response_at_pos_max': Response voltage at +V_max
+                    * 'response_at_neg_max': Response voltage at -V_max
+                    * 'pos_neg_ratio': Ratio of positive to negative response
+                    * 'rectification_index': Degree of asymmetry around origin
+                - Nonlinearity metrics:
+                    * 'linearity_deviation': RMS deviation from linear fit
+                    * 'slope_variation': Std deviation of local slopes
+                    * 'num_inflection_points': Number of curve inflection points
+                - Dynamic range:
+                    * 'response_amplitude': Total response voltage range
+                    * 'voltage_gain': Ratio of response to applied range
+                - Phase-specific features:
+                    * 'phase1_gain': Slope during 0→+V_max phase
+                    * 'phase2_gain': Slope during +V_max→-V_max phase
+                    * 'phase3_gain': Slope during -V_max→0 phase
+                - Memory effects:
+                    * 'return_point_deviation': Difference between start and end response
+                    * 'loop_closure_error': Applied voltage closure error
+                - Shape descriptors:
+                    * 'loop_eccentricity': Aspect ratio of hysteresis loop
+                    * 'centroid_v_applied': Center of mass (applied voltage)
+                    * 'centroid_v_response': Center of mass (response voltage)
+                - Frequency content:
+                    * 'smoothness_index': High-frequency noise measure
+                    * 'oscillation_count': Number of local extrema
                 - 'center_pos': Center electrode position
                 - 'probe_pos': Probe electrode position
         """
@@ -629,30 +851,171 @@ class RealisticFungalComputer:
         dt = t[1] - t[0]
         current_response = np.gradient(v_out, dt)
         
-        # Calculate hysteresis area using the shoelace formula
+        # Extract features from V-V curve
         # Only consider the main sweep region (exclude buffers)
         sweep_start_idx = int(buffer_time / DEFAULT_TIME_STEP)
         sweep_end_idx = int((buffer_time + total_sweep_time) / DEFAULT_TIME_STEP)
         
-        v_sweep = voltage_applied[sweep_start_idx:sweep_end_idx]
-        i_sweep = current_response[sweep_start_idx:sweep_end_idx]
+        v_applied = voltage_applied[sweep_start_idx:sweep_end_idx]
+        v_response = v_out[sweep_start_idx:sweep_end_idx]
+        t_sweep = t[sweep_start_idx:sweep_end_idx] - t[sweep_start_idx]
         
-        # Calculate area using trapezoidal rule
-        # Area = integral of I dV
-        # Use trapezoid (NumPy 2.0+) or trapz (older versions) for compatibility
+        # Identify sweep phases based on time
+        phase1_end_idx = int(t1 / DEFAULT_TIME_STEP)
+        phase2_end_idx = int((t1 + t2) / DEFAULT_TIME_STEP)
+        phase3_end_idx = len(v_applied)
+        
+        # === 1. HYSTERESIS METRICS ===
+        # Total hysteresis area (using applied voltage vs response voltage)
         try:
-            hysteresis_area = np.abs(np.trapezoid(i_sweep, v_sweep))
+            total_hysteresis_area = np.abs(np.trapezoid(v_response, v_applied))
         except AttributeError:
-            hysteresis_area = np.abs(np.trapz(i_sweep, v_sweep))
+            total_hysteresis_area = np.abs(np.trapz(v_response, v_applied))
         
-        logger.info(f"Triangle sweep complete: hysteresis_area={hysteresis_area:.4f}")
+        # Segmented hysteresis (positive vs negative voltage regions)
+        pos_idx = v_applied >= 0
+        neg_idx = v_applied < 0
+        
+        if np.any(pos_idx) and len(v_applied[pos_idx]) > 1:
+            try:
+                pos_hysteresis = np.abs(np.trapezoid(v_response[pos_idx], v_applied[pos_idx]))
+            except AttributeError:
+                pos_hysteresis = np.abs(np.trapz(v_response[pos_idx], v_applied[pos_idx]))
+        else:
+            pos_hysteresis = 0.0
+            
+        if np.any(neg_idx) and len(v_applied[neg_idx]) > 1:
+            try:
+                neg_hysteresis = np.abs(np.trapezoid(v_response[neg_idx], v_applied[neg_idx]))
+            except AttributeError:
+                neg_hysteresis = np.abs(np.trapz(v_response[neg_idx], v_applied[neg_idx]))
+        else:
+            neg_hysteresis = 0.0
+        
+        # Maximum hysteresis width (for each applied voltage, find max separation)
+        # Group by similar applied voltages and find separation
+        v_unique = np.unique(np.round(v_applied, decimals=2))
+        max_hysteresis_width = 0.0
+        for v_val in v_unique:
+            matching_idx = np.abs(v_applied - v_val) < 0.05
+            if np.sum(matching_idx) > 1:
+                v_resp_at_v = v_response[matching_idx]
+                width = np.max(v_resp_at_v) - np.min(v_resp_at_v)
+                max_hysteresis_width = max(max_hysteresis_width, width)
+        
+        # === 2. ASYMMETRY METRICS ===
+        # Response at extremes
+        v_at_pos_max_idx = np.argmin(np.abs(v_applied - v_max))
+        v_at_neg_max_idx = np.argmin(np.abs(v_applied - (-v_max)))
+        response_at_pos_max = v_response[v_at_pos_max_idx]
+        response_at_neg_max = v_response[v_at_neg_max_idx]
+        pos_neg_ratio = response_at_pos_max / (response_at_neg_max + 1e-9)
+        
+        # Rectification index (asymmetry around origin)
+        rectification_index = (np.abs(response_at_pos_max) - np.abs(response_at_neg_max)) / (np.abs(response_at_pos_max) + np.abs(response_at_neg_max) + 1e-9)
+        
+        # === 3. NONLINEARITY METRICS ===
+        # Linearity deviation (RMS deviation from best-fit line)
+        coeffs = np.polyfit(v_applied, v_response, 1)
+        linear_fit = np.polyval(coeffs, v_applied)
+        linearity_deviation = np.sqrt(np.mean((v_response - linear_fit)**2))
+        
+        # Slope variation (range of local slopes)
+        local_slopes = np.gradient(v_response, v_applied)
+        slope_variation = np.std(local_slopes)
+        
+        # Number of inflection points (sign changes in second derivative)
+        second_deriv = np.gradient(local_slopes)
+        sign_changes = np.sum(np.diff(np.sign(second_deriv)) != 0)
+        num_inflection_points = sign_changes
+        
+        # === 4. DYNAMIC RANGE ===
+        response_amplitude = np.max(v_response) - np.min(v_response)
+        applied_range = np.max(v_applied) - np.min(v_applied)
+        voltage_gain = response_amplitude / (applied_range + 1e-9)
+        
+        # === 5. PHASE-SPECIFIC FEATURES ===
+        # Phase 1: 0 -> +v_max
+        phase1_v_applied = v_applied[:phase1_end_idx]
+        phase1_v_response = v_response[:phase1_end_idx]
+        phase1_gain = np.polyfit(phase1_v_applied, phase1_v_response, 1)[0] if len(phase1_v_applied) > 1 else 0.0
+        
+        # Phase 2: +v_max -> -v_max
+        phase2_v_applied = v_applied[phase1_end_idx:phase2_end_idx]
+        phase2_v_response = v_response[phase1_end_idx:phase2_end_idx]
+        phase2_gain = np.polyfit(phase2_v_applied, phase2_v_response, 1)[0] if len(phase2_v_applied) > 1 else 0.0
+        
+        # Phase 3: -v_max -> 0
+        phase3_v_applied = v_applied[phase2_end_idx:phase3_end_idx]
+        phase3_v_response = v_response[phase2_end_idx:phase3_end_idx]
+        phase3_gain = np.polyfit(phase3_v_applied, phase3_v_response, 1)[0] if len(phase3_v_applied) > 1 else 0.0
+        
+        # === 6. MEMORY/HISTORY EFFECTS ===
+        # Return point deviation (difference between start and end)
+        return_point_deviation = np.abs(v_response[-1] - v_response[0])
+        
+        # Loop closure error (should return to same voltage)
+        loop_closure_error = np.abs(v_applied[-1] - v_applied[0])
+        
+        # === 7. SHAPE DESCRIPTORS ===
+        # Loop eccentricity (aspect ratio)
+        v_applied_range = np.max(v_applied) - np.min(v_applied)
+        v_response_range = np.max(v_response) - np.min(v_response)
+        loop_eccentricity = v_response_range / (v_applied_range + 1e-9)
+        
+        # Centroid location
+        centroid_v_applied = np.mean(v_applied)
+        centroid_v_response = np.mean(v_response)
+        
+        # === 8. FREQUENCY CONTENT ===
+        # Smoothness index (high-frequency content)
+        smoothness_index = np.mean(np.abs(np.diff(v_response, n=2)))
+        
+        # Oscillation count (local extrema)
+        from scipy.signal import find_peaks
+        peaks_pos, _ = find_peaks(v_response)
+        peaks_neg, _ = find_peaks(-v_response)
+        oscillation_count = len(peaks_pos) + len(peaks_neg)
+        
+        logger.info(f"Triangle sweep complete: total_area={total_hysteresis_area:.4f}, "
+                   f"gain={voltage_gain:.3f}, asymmetry={rectification_index:.3f}")
         
         return {
             'time': t,
             'voltage_applied': voltage_applied,
             'current_response': current_response,
             'voltage_response': v_out,
-            'hysteresis_area': hysteresis_area,
+            # Hysteresis metrics
+            'total_hysteresis_area': total_hysteresis_area,
+            'pos_hysteresis': pos_hysteresis,
+            'neg_hysteresis': neg_hysteresis,
+            'max_hysteresis_width': max_hysteresis_width,
+            # Asymmetry metrics
+            'response_at_pos_max': response_at_pos_max,
+            'response_at_neg_max': response_at_neg_max,
+            'pos_neg_ratio': pos_neg_ratio,
+            'rectification_index': rectification_index,
+            # Nonlinearity metrics
+            'linearity_deviation': linearity_deviation,
+            'slope_variation': slope_variation,
+            'num_inflection_points': num_inflection_points,
+            # Dynamic range
+            'response_amplitude': response_amplitude,
+            'voltage_gain': voltage_gain,
+            # Phase-specific features
+            'phase1_gain': phase1_gain,
+            'phase2_gain': phase2_gain,
+            'phase3_gain': phase3_gain,
+            # Memory effects
+            'return_point_deviation': return_point_deviation,
+            'loop_closure_error': loop_closure_error,
+            # Shape descriptors
+            'loop_eccentricity': loop_eccentricity,
+            'centroid_v_applied': centroid_v_applied,
+            'centroid_v_response': centroid_v_response,
+            # Frequency content
+            'smoothness_index': smoothness_index,
+            'oscillation_count': oscillation_count,
             'center_pos': center,
             'probe_pos': probe
         }
@@ -1027,7 +1390,8 @@ def optimize_fungal_constants(best_stimulus_params: dict,
 def optimize_xor_gate(num_nodes: int = 30, n_calls: int = 15, 
                      random_state: int = 42,
                      minimizer: str = 'gp',
-                     tune_physics: bool = False) -> dict:
+                     tune_physics: bool = False,
+                     env: RealisticFungalComputer = None) -> dict:
     """Optimize electrode placement for XOR gate implementation.
     
     Args:
@@ -1045,7 +1409,8 @@ def optimize_xor_gate(num_nodes: int = 30, n_calls: int = 15,
     
     print("Initializing Fungal Computer...")
     opt_start_time = time.time()
-    env = RealisticFungalComputer(num_nodes=num_nodes, random_seed=random_state)
+    if not env:
+        env = RealisticFungalComputer(num_nodes=num_nodes, random_seed=random_state)
     
     print(f"Network created: {env.num_nodes} nodes, {len(env.edge_list)} edges")
     print("Starting Bayesian Optimization...\n")
@@ -1679,8 +2044,8 @@ if __name__ == "__main__":
     # Run optimization
     # Set tune_physics=True to enable two-level optimization (stimulus + constants)
     tic = time.time()
-    results = optimize_xor_gate(num_nodes=40, n_calls=200, random_state=42, 
-                               minimizer='gp', tune_physics=True)
+    results = optimize_xor_gate(num_nodes=50, n_calls=200, random_state=42, 
+                               minimizer='gbrt', tune_physics=False)
     
     # If constants were tuned, use the tuned environment for visualization
     if 'tuned_env' in results:

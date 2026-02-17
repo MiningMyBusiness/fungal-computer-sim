@@ -1,0 +1,147 @@
+{
+  "timestamp": "20260116_104714",
+  "mode": "inferred_network",
+  "specimen": {
+    "num_nodes": 40,
+    "num_edges": 108,
+    "random_seed": null
+  },
+  "twin": {
+    "num_nodes": 43,
+    "num_edges": 140,
+    "network_config": {
+      "num_nodes": 43,
+      "seed": 7042
+    }
+  },
+  "true_parameters": {
+    "tau_v": 90.93991171754107,
+    "tau_w": 1570.9812637606278,
+    "a": 0.612902891867506,
+    "b": 0.8761668709057715,
+    "v_scale": 4.368675036372297,
+    "R_off": 285.6899498604751,
+    "R_on": 5.060141719189833,
+    "alpha": 0.0002916166375942721
+  },
+  "predicted_parameters": {
+    "tau_v": 81.4322706066987,
+    "tau_w": 1343.6767269361924,
+    "a": 0.741644481128677,
+    "b": 0.9137796650980757,
+    "v_scale": 7.066596333158052,
+    "R_off": 231.88755648625883,
+    "R_on": 20.43811926844644,
+    "alpha": 0.0005281202289495004
+  },
+  "refined_parameters": {
+    "tau_v": 81.4322706066987,
+    "tau_w": 1343.6767269361924,
+    "a": 0.741644481128677,
+    "b": 0.9137796650980757,
+    "v_scale": 7.066596333158052,
+    "R_off": 231.88755648625883,
+    "R_on": 20.43811926844644,
+    "alpha": 0.0005281202289495004
+  },
+  "network_predictions": {
+    "num_nodes": 46.22241302348047,
+    "num_edges": 188.55860155858744,
+    "network_density": 0.15714579433141332
+  },
+  "model_type": "random_forest",
+  "optimization": {
+    "method": "hierarchical_L-BFGS-B",
+    "stage1_samples": 50,
+    "stage1_node_count_range": [
+      37,
+      55
+    ],
+    "stage1_best_network": {
+      "num_nodes": 43,
+      "seed": 7042
+    },
+    "stage1_best_mismatch": 0.3832936062942152,
+    "stage2_success": false,
+    "stage2_final_mismatch": 0.38329362773211034,
+    "stage2_n_evaluations": 189,
+    "total_improvement": 58.36927048323718,
+    "network_results": [
+      {
+        "seed": 42,
+        "num_nodes": 54,
+        "actual_num_nodes": 54,
+        "num_edges": 219,
+        "mismatch": 0.9206988015373961
+      },
+      {
+        "seed": 1042,
+        "num_nodes": 46,
+        "actual_num_nodes": 46,
+        "num_edges": 154,
+        "mismatch": 0.812000767404075
+      },
+      {
+        "seed": 2042,
+        "num_nodes": 43,
+        "actual_num_nodes": 43,
+        "num_edges": 142,
+        "mismatch": 1.2315808566473665
+      },
+      {
+        "seed": 3042,
+        "num_nodes": 50,
+        "actual_num_nodes": 50,
+        "num_edges": 225,
+        "mismatch": 0.7384206153155745
+      },
+      {
+        "seed": 4042,
+        "num_nodes": 43,
+        "actual_num_nodes": 43,
+        "num_edges": 131,
+        "mismatch": 1.2113594457733783
+      },
+      {
+        "seed": 5042,
+        "num_nodes": 45,
+        "actual_num_nodes": 45,
+        "num_edges": 150,
+        "mismatch": 0.8942607248303643
+      },
+      {
+        "seed": 6042,
+        "num_nodes": 46,
+        "actual_num_nodes": 46,
+        "num_edges": 150,
+        "mismatch": 0.8338977449548634
+      },
+      {
+        "seed": 7042,
+        "num_nodes": 43,
+        "actual_num_nodes": 43,
+        "num_edges": 140,
+        "mismatch": 0.3832936062942152
+      },
+      {
+        "seed": 8042,
+        "num_nodes": 51,
+        "actual_num_nodes": 51,
+        "num_edges": 195,
+        "mismatch": 1.0706512850675423
+      },
+      {
+        "seed": 9042,
+        "num_nodes": 51,
+        "actual_num_nodes": 51,
+        "num_edges": 211,
+        "mismatch": 0.6312816907740456
+      }
+    ]
+  },
+  "mismatch": {
+    "initial": 1.3902578587763676,
+    "final": 0.3832936062942152,
+    "improvement_percent": 72.43003491225936
+  }
+}
