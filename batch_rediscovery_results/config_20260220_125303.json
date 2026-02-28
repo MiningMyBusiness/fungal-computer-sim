@@ -1,0 +1,21 @@
+{
+  "n_specimens": 100,
+  "node_counts": [
+    30,
+    50,
+    80
+  ],
+  "conditions": [
+    "oracle",
+    "ml_only",
+    "ml_refine",
+    "random"
+  ],
+  "model_dir": "ml_models",
+  "model_type": "random_forest",
+  "opt_method": "dual_annealing",
+  "xor_n_calls": 100,
+  "viable_ranges_path": "optimization_study_results/viable_param_ranges.json",
+  "random_seed": 42,
+  "timestamp": "20260219_233107"
+}

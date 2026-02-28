@@ -1322,7 +1322,7 @@ def optimize_fungal_constants(best_stimulus_params: dict,
     logger.info("Beginning GP minimization for constants...")
     gp_start = time.time()
     res = gp_minimize(objective_function, space, n_calls=n_calls, random_state=None,
-                      n_jobs=4, verbose=True, n_initial_points=min(40, n_calls//2), acq_func='EI',
+                      n_jobs=1, verbose=True, n_initial_points=min(40, n_calls//2), acq_func='EI',
                       initial_point_generator='lhs')
     gp_time = time.time() - gp_start
     logger.info(f"GP minimization complete in {gp_time:.2f}s")
@@ -1435,16 +1435,16 @@ def optimize_xor_gate(num_nodes: int = 30, n_calls: int = 15,
     logger.info("Beginning GP minimization...")
     gp_start = time.time()
     res = gp_minimize(objective, space, n_calls=n_calls, random_state=random_state,
-                      n_jobs=4, verbose=True, n_initial_points=40, acq_func='EI',
+                      n_jobs=1, verbose=True, n_initial_points=40, acq_func='EI',
                       initial_point_generator='lhs')
     if minimizer == 'forest':
         res = forest_minimize(objective, space, n_calls=n_calls, random_state=random_state,
                               n_initial_points=40, initial_point_generator='lhs',
-                              acq_func='EI', n_jobs=4)
+                              acq_func='EI', n_jobs=1)
     elif minimizer == 'gbrt':
         res = gbrt_minimize(objective, space, n_calls=n_calls,
                             acq_func='EI', n_initial_points=40, initial_point_generator='lhs',
-                            n_jobs=4)
+                            n_jobs=1)
     gp_time = time.time() - gp_start
     logger.info(f"GP minimization complete in {gp_time:.2f}s")
     

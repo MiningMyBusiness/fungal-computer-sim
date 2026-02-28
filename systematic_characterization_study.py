@@ -22,6 +22,8 @@ from realistic_sim import RealisticFungalComputer
 import logging
 import argparse
 from typing import Dict, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import os
 
 # Configure logging
 logging.basicConfig(
@@ -406,11 +408,51 @@ def load_checkpoint(checkpoint_path: Path) -> Tuple[pd.DataFrame, set]:
 # Main Study Loop
 # ==========================================
 
-def run_systematic_characterization(resume: bool = False):
+# ==========================================
+# Top-level worker (must be picklable — no lambdas)
+# ==========================================
+
+def _characterize_trial_worker(args):
+    """Run a single characterization trial in a worker process.
+
+    Args:
+        args: Tuple of (num_nodes, trial_idx, random_state)
+
+    Returns:
+        Record dict (same schema as extract_trial_data output).
+    """
+    num_nodes, trial_idx, random_state = args
+    trial_start = time.time()
+    rng = np.random.RandomState(random_state)
+    params = sample_fungal_parameters(rng)
+    try:
+        env = RealisticFungalComputer(num_nodes=num_nodes, random_seed=random_state)
+        apply_parameters_to_env(env, params)
+        features = run_characterization(env)
+        trial_duration = time.time() - trial_start
+        record = extract_trial_data(env, params, features, num_nodes,
+                                    trial_idx, random_state, trial_duration)
+    except Exception as e:
+        trial_duration = time.time() - trial_start
+        record = {
+            'num_nodes': num_nodes,
+            'trial_idx': trial_idx,
+            'random_state': random_state,
+            'characterization_success': False,
+            'error_message': str(e),
+            'trial_duration_seconds': trial_duration,
+        }
+        for param in PARAM_RANGES.keys():
+            record[param] = float('nan')
+    return record
+
+
+def run_systematic_characterization(resume: bool = False, n_workers: int = 1):
     """Run the systematic characterization study.
-    
+
     Args:
         resume: If True, attempt to resume from the most recent checkpoint
+        n_workers: Number of parallel worker processes (1 = serial)
     """
     # Handle resume logic
     completed_trials = set()
@@ -475,88 +517,64 @@ def run_systematic_characterization(resume: bool = False):
     logger.info("="*70)
     
     study_start_time = time.time()
-    
-    # Main loop: iterate over node counts
+
+    # Build list of pending tasks
+    pending_tasks = []
     for num_nodes in NODE_COUNTS:
-        logger.info("")
-        logger.info("="*70)
-        logger.info(f"TESTING NODE COUNT: {num_nodes}")
-        logger.info("="*70)
-        
-        # Run multiple trials with different random parameters
         for trial_idx in range(TRIALS_PER_NODE_COUNT):
-            current_trial += 1
-            
-            # Skip if this trial was already completed
-            if (num_nodes, trial_idx) in completed_trials:
-                logger.info(f"Skipping completed trial {current_trial}/{total_trials}: num_nodes={num_nodes}, trial={trial_idx+1}/{TRIALS_PER_NODE_COUNT}")
-                continue
-            
-            # Generate random seed for this trial
-            random_state = np.random.randint(0, 1000000)
-            rng = np.random.RandomState(random_state)
-            
-            # Sample fungal parameters
-            params = sample_fungal_parameters(rng)
-            
-            logger.info("")
-            logger.info(f"Trial {current_trial}/{total_trials}: num_nodes={num_nodes}, trial={trial_idx+1}/{TRIALS_PER_NODE_COUNT}, seed={random_state}")
-            logger.debug(f"Parameters: tau_v={params['tau_v']:.1f}, tau_w={params['tau_w']:.1f}, a={params['a']:.2f}, b={params['b']:.2f}")
-            logger.info("-"*70)
-            
-            trial_start_time = time.time()
-            
-            try:
-                # Create environment with sampled parameters
-                env = RealisticFungalComputer(num_nodes=num_nodes, random_seed=random_state)
-                apply_parameters_to_env(env, params)
-                
-                # Run characterization protocols
-                features = run_characterization(env)
-                
-                # Compile trial data
-                trial_duration = time.time() - trial_start_time
-                record = extract_trial_data(env, params, features, num_nodes, 
-                                          trial_idx, random_state, trial_duration)
-                
-                all_results.append(record)
-                
-                if features['characterization_success']:
-                    logger.info(f"Trial completed successfully in {trial_duration:.1f}s")
-                    logger.info(f"Features: time_to_peak={features['step_time_to_peak']:.1f}ms, "
-                              f"peak_amplitude={features['step_peak_amplitude']:.3f}V, "
-                              f"hysteresis={features['tri_total_hysteresis_area']:.4f}")
-                else:
-                    logger.warning(f"Trial completed with errors in {trial_duration:.1f}s")
-                
-            except Exception as e:
-                logger.error(f"Trial failed with error: {str(e)}")
-                # Store error information
-                record = {
-                    'num_nodes': num_nodes,
-                    'trial_idx': trial_idx,
-                    'random_state': random_state,
-                    'characterization_success': False,
-                    'error_message': str(e),
-                    'trial_duration_seconds': time.time() - trial_start_time,
-                }
-                # Add NaN for all parameters and features
-                for param in PARAM_RANGES.keys():
-                    record[param] = np.nan
-                all_results.append(record)
-            
-            # Save checkpoint every 10 trials
-            if len(all_results) % 10 == 0:
-                results_df = pd.DataFrame(all_results)
-                save_checkpoint(results_df, checkpoint_file)
-            
-            # Progress update every 50 trials
-            if current_trial % 50 == 0:
-                elapsed_time = time.time() - study_start_time
-                avg_time_per_trial = elapsed_time / current_trial
-                estimated_remaining = avg_time_per_trial * (total_trials - current_trial)
-                logger.info(f"Progress: {current_trial}/{total_trials} ({100*current_trial/total_trials:.1f}%)")
-                logger.info(f"Elapsed: {elapsed_time/60:.1f}min, Estimated remaining: {estimated_remaining/60:.1f}min")
+            if (num_nodes, trial_idx) not in completed_trials:
+                random_state = int(np.random.randint(0, 1_000_000))
+                pending_tasks.append((num_nodes, trial_idx, random_state))
+
+    logger.info(f"Pending trials: {len(pending_tasks)} / {total_trials}")
+    logger.info(f"Workers: {n_workers}")
+
+    def _handle_record(record):
+        """Append record, checkpoint every 10, log progress."""
+        nonlocal current_trial
+        current_trial += 1
+        all_results.append(record)
+        if len(all_results) % 10 == 0:
+            results_df = pd.DataFrame(all_results)
+            save_checkpoint(results_df, checkpoint_file)
+        elapsed = time.time() - study_start_time
+        done = len(all_results)
+        avg = elapsed / done if done else 0
+        remaining = avg * (total_trials - done)
+        ok = record.get('characterization_success', False)
+        status = 'OK' if ok else f"FAILED: {record.get('error_message', '')[:60]}"
+        if done % 10 == 0 or not ok:
+            logger.info(
+                f"[{done}/{total_trials}] nodes={record['num_nodes']} trial={record['trial_idx']} "
+                f"| {status} | elapsed={elapsed/60:.1f}min ETA={remaining/60:.1f}min"
+            )
+
+    if n_workers <= 1:
+        # ---- Serial execution (original behaviour) ----
+        for task in pending_tasks:
+            record = _characterize_trial_worker(task)
+            _handle_record(record)
+    else:
+        # ---- Parallel execution ----
+        logger.info(f"Launching ProcessPoolExecutor with {n_workers} workers")
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            future_to_task = {executor.submit(_characterize_trial_worker, t): t for t in pending_tasks}
+            for future in as_completed(future_to_task):
+                try:
+                    record = future.result()
+                except Exception as e:
+                    task = future_to_task[future]
+                    record = {
+                        'num_nodes': task[0],
+                        'trial_idx': task[1],
+                        'random_state': task[2],
+                        'characterization_success': False,
+                        'error_message': str(e),
+                        'trial_duration_seconds': 0,
+                    }
+                    for param in PARAM_RANGES.keys():
+                        record[param] = float('nan')
+                _handle_record(record)
     
     # Save final results
     results_df = pd.DataFrame(all_results)
@@ -631,6 +649,11 @@ if __name__ == "__main__":
         action='store_true',
         help='Quick test mode: fewer trials for testing'
     )
+    parser.add_argument(
+        '--n-workers', type=int, default=1,
+        help='Number of parallel worker processes (default: 1 = serial). '
+             'E.g. --n-workers 4'
+    )
     args = parser.parse_args()
     
     # Adjust configuration for quick mode
@@ -656,6 +679,7 @@ if __name__ == "__main__":
     print(f"Node counts: {NODE_COUNTS}")
     print(f"Trials per node count: {TRIALS_PER_NODE_COUNT}")
     print(f"Output directory: {OUTPUT_DIR}")
+    print(f"Workers: {args.n_workers} ({'parallel' if args.n_workers > 1 else 'serial'})")
     print("="*70)
     
     if args.yes:
@@ -665,7 +689,7 @@ if __name__ == "__main__":
         proceed = response.lower() in ['yes', 'y']
     
     if proceed:
-        results_df = run_systematic_characterization(resume=args.resume)
+        results_df = run_systematic_characterization(resume=args.resume, n_workers=args.n_workers)
         print("\nStudy completed successfully!")
         print(f"Results saved to: {OUTPUT_DIR}")
         print(f"Dataset size: {len(results_df[results_df['characterization_success'] == True])} successful samples")

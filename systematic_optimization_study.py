@@ -20,6 +20,8 @@ from networkx.algorithms import community
 import logging
 import argparse
 import glob
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import os
 
 # Configure logging
 logging.basicConfig(
@@ -35,11 +37,13 @@ logger = logging.getLogger(__name__)
 
 # Node density study: systematic progression
 # Start sparse, gradually increase density
+# NOTE: 30 and 50 are included to align with sensitivity_analysis.py
+# (which uses rng.choice([30, 50, 80])) and batch_rediscovery_study.py.
 NODE_COUNTS = [
-    # Sparse network
-    20,
+    # Sparse networks
+    20, 30,
     # Medium density
-    40,
+    40, 50,
     # Higher density
     60, 80,
     # Dense networks
@@ -47,7 +51,10 @@ NODE_COUNTS = [
 ]
 
 # Number of random trials per node count
-TRIALS_PER_CONFIG = 10
+# 20 trials x 8 node counts = 160 total trials.
+# At ~32% viability, expect ~51 specimens in the top 25% —
+# sufficient for a statistically robust sensitivity analysis.
+TRIALS_PER_CONFIG = 20
 
 # Optimization iterations per trial
 N_CALLS = 60  # Can be adjusted based on time constraints
@@ -58,6 +65,33 @@ TUNE_PHYSICS = True
 # Output directory
 OUTPUT_DIR = Path("optimization_study_results")
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+# ==========================================
+# Downstream Column Contract
+# ==========================================
+# The CSV produced by this study is consumed by:
+#   - define_viable_range.py       (reads tuned_score, tuned_* params)
+#   - sensitivity_analysis.py      (reads num_nodes, random_state, tuned_* params,
+#                                   x_A/y_A, x_B/y_B, x_out/y_out, voltage,
+#                                   duration, delay, tuned_score, success)
+#   - analyze_optimization_results.py (reads all columns)
+#
+# Specimen reconstruction contract:
+#   RealisticFungalComputer(num_nodes=<num_nodes>, random_seed=<random_state>)
+#   reproduces the exact network that was optimized, because optimize_xor_gate()
+#   passes random_state directly to RealisticFungalComputer as random_seed.
+#   See: realistic_sim.py -> optimize_xor_gate() line:
+#       env = RealisticFungalComputer(num_nodes=num_nodes, random_seed=random_state)
+#
+# Key columns saved per trial:
+#   num_nodes, random_state           -> reconstruct network
+#   tuned_tau_v .. tuned_alpha        -> ground-truth physics after tuning
+#   tuned_score                       -> filter viable specimens (top 25/75%)
+#   x_A, y_A, x_B, y_B               -> optimized electrode positions
+#   x_out, y_out                      -> optimized output probe position
+#   voltage, duration, delay          -> optimized stimulus parameters
+#   score                             -> pre-tuning XOR score
+# ==========================================
 
 # ==========================================
 # Helper Functions
@@ -260,11 +294,51 @@ def load_checkpoint(checkpoint_path):
 # Main Study Loop
 # ==========================================
 
-def run_systematic_study(resume=False):
+# ==========================================
+# Top-level worker (must be picklable — no lambdas)
+# ==========================================
+
+def _run_trial_worker(args):
+    """Run a single optimization trial in a worker process.
+
+    Args:
+        args: Tuple of (num_nodes, trial_idx, random_state, n_calls, tune_physics)
+
+    Returns:
+        Record dict (same schema as extract_results output).
+    """
+    num_nodes, trial_idx, random_state, n_calls, tune_physics = args
+    trial_start = time.time()
+    try:
+        results = optimize_xor_gate(
+            num_nodes=num_nodes,
+            n_calls=n_calls,
+            random_state=random_state,
+            tune_physics=tune_physics,
+            minimizer='gp',
+        )
+        record = extract_results(results, num_nodes, trial_idx, random_state)
+        record['trial_duration_seconds'] = time.time() - trial_start
+        record['success'] = True
+        record['error_message'] = None
+    except Exception as e:
+        record = {
+            'num_nodes': num_nodes,
+            'trial_idx': trial_idx,
+            'random_state': random_state,
+            'success': False,
+            'error_message': str(e),
+            'trial_duration_seconds': time.time() - trial_start,
+        }
+    return record
+
+
+def run_systematic_study(resume=False, n_workers=1):
     """Run the systematic optimization study.
-    
+
     Args:
         resume: If True, attempt to resume from the most recent checkpoint
+        n_workers: Number of parallel worker processes (1 = serial)
     """
     # Handle resume logic
     completed_trials = set()
@@ -331,80 +405,64 @@ def run_systematic_study(resume=False):
     logger.info("="*70)
     
     study_start_time = time.time()
-    
-    # Main loop: iterate over node counts
+
+    # Build the list of pending tasks (skip already-completed)
+    pending_tasks = []
     for num_nodes in NODE_COUNTS:
-        logger.info("")
-        logger.info("="*70)
-        logger.info(f"TESTING CONFIGURATION: num_nodes={num_nodes}")
-        logger.info("="*70)
-        
-        # Run multiple trials with different random seeds
         for trial_idx in range(TRIALS_PER_CONFIG):
-            current_trial += 1
-            
-            # Skip if this trial was already completed
-            if (num_nodes, trial_idx) in completed_trials:
-                logger.info(f"Skipping completed trial {current_trial}/{total_trials}: num_nodes={num_nodes}, trial={trial_idx+1}/{TRIALS_PER_CONFIG}")
-                continue
-            
-            # Generate random seed for this trial
-            random_state = np.random.randint(0, 100000)
-            
-            logger.info("")
-            logger.info(f"Trial {current_trial}/{total_trials}: num_nodes={num_nodes}, trial={trial_idx+1}/{TRIALS_PER_CONFIG}, seed={random_state}")
-            logger.info("-"*70)
-            
-            trial_start_time = time.time()
-            
-            try:
-                # Run optimization
-                results = optimize_xor_gate(
-                    num_nodes=num_nodes,
-                    n_calls=N_CALLS,
-                    random_state=random_state,
-                    tune_physics=TUNE_PHYSICS,
-                    minimizer='gp',
-                )
-                
-                # Extract and store results
-                record = extract_results(results, num_nodes, trial_idx, random_state)
-                record['trial_duration_seconds'] = time.time() - trial_start_time
-                record['success'] = True
-                record['error_message'] = None
-                
-                all_results.append(record)
-                
-                trial_time = time.time() - trial_start_time
-                logger.info(f"Trial completed successfully in {trial_time:.1f}s")
-                logger.info(f"Score: {record['score']:.4f}")
-                if TUNE_PHYSICS and not np.isnan(record['tuned_score']):
-                    logger.info(f"Tuned score: {record['tuned_score']:.4f} (improvement: {record['score_improvement']:.4f})")
-                
-            except Exception as e:
-                logger.error(f"Trial failed with error: {str(e)}")
-                # Store error information
-                record = {
-                    'num_nodes': num_nodes,
-                    'trial_idx': trial_idx,
-                    'random_state': random_state,
-                    'success': False,
-                    'error_message': str(e),
-                    'trial_duration_seconds': time.time() - trial_start_time,
-                }
-                all_results.append(record)
-            
-            # Save checkpoint after each trial
-            if all_results:
-                results_df = pd.DataFrame(all_results)
-                save_checkpoint(results_df, checkpoint_file)
-            
-            # Progress update
-            elapsed_time = time.time() - study_start_time
-            avg_time_per_trial = elapsed_time / current_trial
-            estimated_remaining = avg_time_per_trial * (total_trials - current_trial)
-            logger.info(f"Progress: {current_trial}/{total_trials} ({100*current_trial/total_trials:.1f}%)")
-            logger.info(f"Elapsed: {elapsed_time/60:.1f}min, Estimated remaining: {estimated_remaining/60:.1f}min")
+            if (num_nodes, trial_idx) not in completed_trials:
+                random_state = int(np.random.randint(0, 100000))
+                pending_tasks.append((num_nodes, trial_idx, random_state, N_CALLS, TUNE_PHYSICS))
+
+    logger.info(f"Pending trials: {len(pending_tasks)} / {total_trials}")
+    logger.info(f"Workers: {n_workers}")
+
+    def _handle_record(record):
+        """Append record, checkpoint, and log progress."""
+        nonlocal current_trial
+        current_trial += 1
+        all_results.append(record)
+        if all_results:
+            results_df = pd.DataFrame(all_results)
+            save_checkpoint(results_df, checkpoint_file)
+        elapsed = time.time() - study_start_time
+        done = len(all_results)
+        avg = elapsed / done if done else 0
+        remaining = avg * (total_trials - done)
+        status = 'OK' if record.get('success') else f"FAILED: {record.get('error_message', '')[:60]}"
+        logger.info(
+            f"[{done}/{total_trials}] nodes={record['num_nodes']} trial={record['trial_idx']} "
+            f"seed={record['random_state']} | {status} | "
+            f"elapsed={elapsed/60:.1f}min ETA={remaining/60:.1f}min"
+        )
+        if record.get('success'):
+            logger.info(f"  Score: {record.get('score', float('nan')):.4f}  "
+                        f"Tuned: {record.get('tuned_score', float('nan')):.4f}")
+
+    if n_workers <= 1:
+        # ---- Serial execution (original behaviour) ----
+        for task in pending_tasks:
+            record = _run_trial_worker(task)
+            _handle_record(record)
+    else:
+        # ---- Parallel execution ----
+        logger.info(f"Launching ProcessPoolExecutor with {n_workers} workers")
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            future_to_task = {executor.submit(_run_trial_worker, t): t for t in pending_tasks}
+            for future in as_completed(future_to_task):
+                try:
+                    record = future.result()
+                except Exception as e:
+                    task = future_to_task[future]
+                    record = {
+                        'num_nodes': task[0],
+                        'trial_idx': task[1],
+                        'random_state': task[2],
+                        'success': False,
+                        'error_message': str(e),
+                        'trial_duration_seconds': 0,
+                    }
+                _handle_record(record)
     
     # Save final results
     results_df = pd.DataFrame(all_results)
@@ -478,6 +536,11 @@ if __name__ == "__main__":
         action='store_true',
         help='Skip confirmation prompt and start immediately'
     )
+    parser.add_argument(
+        '--n-workers', type=int, default=1,
+        help='Number of parallel worker processes (default: 1 = serial). '
+             'Set to os.cpu_count() or a specific value, e.g. --n-workers 4'
+    )
     args = parser.parse_args()
     
     print("\n" + "="*70)
@@ -497,6 +560,7 @@ if __name__ == "__main__":
     print(f"Node counts: {NODE_COUNTS}")
     print(f"Trials per configuration: {TRIALS_PER_CONFIG}")
     print(f"Physics tuning: {'ENABLED' if TUNE_PHYSICS else 'DISABLED'}")
+    print(f"Workers: {args.n_workers} ({'parallel' if args.n_workers > 1 else 'serial'})")
     print("="*70)
     
     if args.yes:
@@ -506,7 +570,7 @@ if __name__ == "__main__":
         proceed = response.lower() in ['yes', 'y']
     
     if proceed:
-        results_df = run_systematic_study(resume=args.resume)
+        results_df = run_systematic_study(resume=args.resume, n_workers=args.n_workers)
         print("\nStudy completed successfully!")
         print(f"Results saved to: {OUTPUT_DIR}")
     else:
