@@ -1,0 +1,14 @@
+{
+  "opt_results_path": "optimization_study_results/optimization_results_20260218_113217.csv",
+  "score_percentile": 75,
+  "n_specimens": 20,
+  "conditions": [
+    "oracle",
+    "ml_only",
+    "ml_refine"
+  ],
+  "model_dir": "ml_models",
+  "model_type": "random_forest",
+  "opt_method": "dual_annealing",
+  "timestamp": "20260318_143058"
+}

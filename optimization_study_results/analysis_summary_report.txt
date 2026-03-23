@@ -2,8 +2,8 @@
 SYSTEMATIC XOR GATE OPTIMIZATION STUDY - ANALYSIS REPORT
 ======================================================================
 
-Total trials: 41
-Successful trials: 41
+Total trials: 125
+Successful trials: 125
 Success rate: 100.0%
 
 ======================================================================
@@ -11,87 +11,87 @@ GENERAL PRINCIPLES IDENTIFIED
 ======================================================================
 
 1. OPTIMAL ELECTRODE PLACEMENT:
-   Based on top 25% performers (N=11):
+   Based on top 25% performers (N=32):
 
    - Distance between input electrodes (A-B):
-     7.54 ± 3.81 mm
+     8.28 ± 6.37 mm
 
    - Distance from inputs to output:
-     13.20 ± 3.55 mm
+     12.78 ± 2.85 mm
 
 2. OPTIMAL STIMULUS PARAMETERS:
    Based on top 25% performers:
 
-   - Voltage: 3.71 ± 1.73 V
-   - Pulse duration: 2572.1 ± 1809.0 ms
-   - Electrode delay: -40.7 ± 121.1 ms
+   - Voltage: 2.43 ± 0.89 V
+   - Pulse duration: 2962.7 ± 1674.0 ms
+   - Electrode delay: -14.6 ± 135.9 ms
 
 3. NODE DENSITY EFFECTS:
-   Correlation (num_nodes vs score): r=-0.164, p=0.3065
-   → Lower node density IMPROVES performance
+   Correlation (num_nodes vs score): r=-0.030, p=0.7358
+   → Node density has MINIMAL effect on performance
 
 4. NETWORK TOPOLOGY EFFECTS:
    Correlations with performance:
 
-   - clustering_coefficient: r=0.152, p=0.3439
+   - clustering_coefficient: r=0.116, p=0.1985
      → No significant correlation
-   - algebraic_connectivity: r=-0.254, p=0.1085
+   - algebraic_connectivity: r=-0.107, p=0.2361
      → No significant correlation
-   - avg_path_length: r=0.382, p=0.0138
-     → STRONG positive correlation (significant)
-   - modularity: r=0.247, p=0.1198
-     → No significant correlation
+   - avg_path_length: r=0.213, p=0.0170
+     → Moderate positive correlation (significant)
+   - modularity: r=0.205, p=0.0221
+     → Moderate positive correlation (significant)
 
    Optimal ranges (top 25% performers):
-   - clustering_coefficient: 0.6794 ± 0.0205
-   - algebraic_connectivity: 0.5085 ± 0.3943
-   - avg_path_length: 3.1605 ± 0.3273
-   - modularity: 0.5263 ± 0.0575
+   - clustering_coefficient: 0.6603 ± 0.0316
+   - algebraic_connectivity: 0.4873 ± 0.3910
+   - avg_path_length: 3.1441 ± 0.3874
+   - modularity: 0.5232 ± 0.0643
 
 5. OPTIMAL FUNGAL CHARACTERISTICS:
-   Based on physics tuning (N=41):
+   Based on physics tuning (N=125):
 
-   Mean improvement from tuning: 0.0809 ± 0.7050
+   Mean improvement from tuning: 0.0464 ± 0.4074
 
    - tau_v:
-     Optimal: 73.472 ± 35.334
+     Optimal: 54.828 ± 16.250
      Default: 50.000
-     Change: +46.9%
+     Change: +9.7%
 
    - tau_w:
-     Optimal: 956.734 ± 347.537
+     Optimal: 901.453 ± 207.326
      Default: 800.000
-     Change: +19.6%
+     Change: +12.7%
 
    - a:
-     Optimal: 0.597 ± 0.078
+     Optimal: 0.656 ± 0.047
      Default: 0.700
-     Change: -14.7%
+     Change: -6.3%
 
    - b:
-     Optimal: 0.856 ± 0.090
+     Optimal: 0.854 ± 0.056
      Default: 0.800
-     Change: +7.0%
+     Change: +6.7%
 
    - v_scale:
-     Optimal: 5.225 ± 3.035
+     Optimal: 4.393 ± 2.411
      Default: 5.000
-     Change: +4.5%
+     Change: -12.1%
 
    - R_off:
-     Optimal: 211.560 ± 57.876
+     Optimal: 173.788 ± 57.832
      Default: 100.000
-     Change: +111.6%
+     Change: +73.8%
 
    - R_on:
-     Optimal: 19.236 ± 13.262
+     Optimal: 16.954 ± 6.097
      Default: 10.000
-     Change: +92.4%
+     Change: +69.5%
 
    - alpha:
-     Optimal: 0.012 ± 0.006
+     Optimal: 0.010 ± 0.004
      Default: 0.010
-     Change: +19.5%
+     Change: -1.5%
 
 ======================================================================
 END OF REPORT
