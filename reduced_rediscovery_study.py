@@ -65,6 +65,7 @@ DEFAULT_OPT_METHOD = "dual_annealing"
 DEFAULT_SCORE_PERCENTILE = 75
 DEFAULT_CONDITIONS = ["oracle", "ml_only", "ml_refine"]
 CORE_IDENTIFIABLE_PARAMS = ["tau_v", "tau_w", "a", "b", "alpha"]
+DEFAULT_MAX_NODES = 50
 
 
 def find_latest_opt_results() -> Optional[Path]:
@@ -81,12 +82,25 @@ def load_optimized_specimens(
     opt_results_path: Path,
     score_percentile: int = DEFAULT_SCORE_PERCENTILE,
     max_specimens: Optional[int] = None,
+    max_nodes: Optional[int] = DEFAULT_MAX_NODES,
 ) -> pd.DataFrame:
     """Load top-scoring pre-optimized specimens from an optimization study CSV."""
     df = pd.read_csv(opt_results_path)
     df = df[(df["success"] == True) & df["tuned_score"].notna()].copy()
     if len(df) == 0:
         return df
+
+    if max_nodes is not None:
+        before = len(df)
+        df = df[df["num_nodes"] <= max_nodes].copy()
+        logger.info(
+            "Applied node-count filter: kept %d/%d specimens with num_nodes <= %d",
+            len(df),
+            before,
+            max_nodes,
+        )
+        if len(df) == 0:
+            return df
 
     threshold = df["tuned_score"].quantile(score_percentile / 100.0)
     viable = df[df["tuned_score"] >= threshold].sort_values(
@@ -367,6 +381,7 @@ def run_reduced_rediscovery(
     opt_results_path: Path,
     score_percentile: int = DEFAULT_SCORE_PERCENTILE,
     n_specimens: int = 20,
+    max_nodes: Optional[int] = DEFAULT_MAX_NODES,
     conditions: Optional[List[str]] = None,
     model_dir: Path = DEFAULT_MODEL_DIR,
     model_type: str = DEFAULT_MODEL_TYPE,
@@ -397,6 +412,17 @@ def run_reduced_rediscovery(
             timestamp = checkpoint_file.stem.replace("checkpoint_", "")
             results_file = OUTPUT_DIR / f"reduced_rediscovery_{timestamp}.csv"
             config_file = OUTPUT_DIR / f"config_{timestamp}.json"
+            if config_file.exists():
+                with open(config_file) as f:
+                    prev_config = json.load(f)
+                prev_max_nodes = prev_config.get("max_nodes")
+                if prev_max_nodes != max_nodes:
+                    raise ValueError(
+                        "Checkpoint configuration mismatch: "
+                        f"checkpoint max_nodes={prev_max_nodes}, "
+                        f"current max_nodes={max_nodes}. "
+                        "Start a new run or use the same node filter."
+                    )
             prev = pd.read_csv(checkpoint_file)
             all_results = prev.to_dict("records")
             for row in all_results:
@@ -412,6 +438,7 @@ def run_reduced_rediscovery(
         opt_results_path,
         score_percentile=score_percentile,
         max_specimens=n_specimens,
+        max_nodes=max_nodes,
     )
     if len(specimens_df) == 0:
         raise ValueError("No optimized specimens available for reduced rediscovery.")
@@ -420,6 +447,7 @@ def run_reduced_rediscovery(
         "opt_results_path": str(opt_results_path),
         "score_percentile": score_percentile,
         "n_specimens": len(specimens_df),
+        "max_nodes": max_nodes,
         "conditions": conditions,
         "model_dir": str(model_dir),
         "model_type": model_type,
@@ -455,6 +483,7 @@ def run_reduced_rediscovery(
     logger.info("%s", "=" * 70)
     logger.info("Opt results: %s", opt_results_path)
     logger.info("Specimens: %d", len(specimens_df))
+    logger.info("Max nodes: %s", max_nodes if max_nodes is not None else "none")
     logger.info("Conditions: %s", conditions)
     logger.info("Workers: %d", n_workers)
 
@@ -540,6 +569,13 @@ def main():
         help="Maximum number of top optimized specimens to evaluate",
     )
     parser.add_argument(
+        "--max-nodes",
+        type=int,
+        default=DEFAULT_MAX_NODES,
+        help="Only evaluate specimens with num_nodes <= this value "
+             f"(default: {DEFAULT_MAX_NODES})",
+    )
+    parser.add_argument(
         "--model-dir",
         type=Path,
         default=DEFAULT_MODEL_DIR,
@@ -581,6 +617,7 @@ def main():
         opt_results_path=opt_results_path,
         score_percentile=args.score_percentile,
         n_specimens=args.n_specimens,
+        max_nodes=args.max_nodes,
         model_dir=args.model_dir,
         model_type=args.model_type,
         opt_method=args.opt_method,
