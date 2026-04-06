@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+import matplotlib.ticker as mticker
 import seaborn as sns
 from pathlib import Path
 from scipy import stats
@@ -274,7 +275,7 @@ def plot_viable_range(df: pd.DataFrame, viable_df: pd.DataFrame,
     """
     sns.set_style("whitegrid")
     fig = plt.figure(figsize=(18, 14))
-    gs = gridspec.GridSpec(3, 4, figure=fig, hspace=0.45, wspace=0.35)
+    gs = gridspec.GridSpec(3, 4, figure=fig, hspace=0.50, wspace=0.40)
 
     # ---- Top row: score distribution ----
     ax_score = fig.add_subplot(gs[0, :2])
@@ -283,10 +284,14 @@ def plot_viable_range(df: pd.DataFrame, viable_df: pd.DataFrame,
                   label='All trials')
     ax_score.axvline(threshold, color='#DD4444', linewidth=2.5, linestyle='--',
                      label=f'Viable threshold ({threshold:.3f})')
-    ax_score.set_xlabel('XOR Score (tuned)', fontsize=12, fontweight='bold')
-    ax_score.set_ylabel('Count', fontsize=12, fontweight='bold')
-    ax_score.set_title('Score Distribution', fontsize=13, fontweight='bold')
-    ax_score.legend(fontsize=10)
+    ax_score.set_xlabel('XOR Score (tuned)', fontsize=16, fontweight='bold')
+    ax_score.set_ylabel('Count', fontsize=16, fontweight='bold')
+    ax_score.set_title('Score Distribution', fontsize=18, fontweight='bold')
+    ax_score.tick_params(axis='both', labelsize=14)
+    ax_score.xaxis.set_major_locator(mticker.MaxNLocator(nbins=6))
+    plt.setp(ax_score.get_xticklabels(), fontweight='bold')
+    plt.setp(ax_score.get_yticklabels(), fontweight='bold')
+    ax_score.legend(fontsize=14)
 
     # ---- Top row: score vs num_nodes ----
     ax_nodes = fig.add_subplot(gs[0, 2:])
@@ -298,10 +303,13 @@ def plot_viable_range(df: pd.DataFrame, viable_df: pd.DataFrame,
                          label=f'{nc} nodes')
     ax_nodes.axhline(threshold, color='#DD4444', linewidth=2, linestyle='--',
                      label='Viable threshold')
-    ax_nodes.set_xlabel('Network Size (nodes)', fontsize=12, fontweight='bold')
-    ax_nodes.set_ylabel('XOR Score (tuned)', fontsize=12, fontweight='bold')
-    ax_nodes.set_title('Score by Network Size', fontsize=13, fontweight='bold')
-    ax_nodes.legend(fontsize=8, ncol=2)
+    ax_nodes.set_xlabel('Network Size (nodes)', fontsize=16, fontweight='bold')
+    ax_nodes.set_ylabel('XOR Score (tuned)', fontsize=16, fontweight='bold')
+    ax_nodes.set_title('Score by Network Size', fontsize=18, fontweight='bold')
+    ax_nodes.tick_params(axis='both', labelsize=14)
+    plt.setp(ax_nodes.get_xticklabels(), fontweight='bold')
+    plt.setp(ax_nodes.get_yticklabels(), fontweight='bold')
+    ax_nodes.legend(fontsize=12, ncol=2)
 
     # ---- Parameter violin plots ----
     for idx, param in enumerate(FUNGAL_PARAMS):
@@ -331,14 +339,18 @@ def plot_viable_range(df: pd.DataFrame, viable_df: pd.DataFrame,
         sns.violinplot(data=plot_data, x='group', y='value', ax=ax,
                        palette={'All': '#4C72B0', 'Viable': '#55A868'},
                        inner='quartile', cut=0)
-        ax.set_title(PARAM_LABELS[param], fontsize=11, fontweight='bold')
+        ax.set_title(PARAM_LABELS[param], fontsize=16, fontweight='bold')
         ax.set_xlabel('')
-        ax.set_ylabel('Value', fontsize=9)
-        ax.tick_params(axis='x', labelsize=10)
+        ax.set_ylabel('Value', fontsize=14, fontweight='bold')
+        ax.tick_params(axis='x', labelsize=14)
+        ax.tick_params(axis='y', labelsize=13)
+        ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=5))
+        plt.setp(ax.get_xticklabels(), fontweight='bold')
+        plt.setp(ax.get_yticklabels(), fontweight='bold')
 
     plt.suptitle('Viable Biophysical Parameter Range for XOR Computation\n'
                  f'(Viable = top {100*(1 - threshold/scores_all.max()):.0f}% by tuned XOR score)',
-                 fontsize=14, fontweight='bold', y=1.01)
+                 fontsize=19, fontweight='bold', y=1.01)
 
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     logger.info(f"Saved Figure 1: {output_path}")
